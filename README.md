@@ -862,8 +862,8 @@ Forever in the game, so by default colours still differ from Classic.
   for the continent cap is unknown. Without the key in the INI it stays off.
 - Modern water: water seen from below keeps the client's look; rivers have no flow direction (the client has no
   flow maps), so Forever's river foam is omitted; the surface stays flat and only its shading moves; reflections are
-  screen-space: hits fade at every screen edge, and a ray that leaves the top of the screen over scene geometry
-  keeps the exit colour (weight 0.85) instead of the sky colours, which remain the fallback elsewhere;
+  screen-space; a ray that finds no hit takes the scene where its direction appears on screen (distant shores
+  and trees reflect as seen), fading to the sky colours toward the screen edges and where that point is off screen;
   interiors are detected by liquid type only.
 - The noise column mapping, the noise volume and `ClassicPhase`'s normalisation are inferred; `ClassicPhase` stays 0.
 - `ForeverGlow` sets only the amount: the client's glow adds `g·blur²`, Forever's a linear term.

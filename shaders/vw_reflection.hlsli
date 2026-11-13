@@ -25,12 +25,11 @@ static const float kMinInverseViewZ = 1e-8;
 static const float kMinScreenStep = 1e-6;
 static const float kReflectionThicknessYards = 1.5;
 static const float kReflectionRelativeThickness = 0.05;
-static const float kEdgeFadeWidth = 0.08;
+static const float kVerticalFadeStart = 0.9;
+static const float kVerticalFadeRate = 10;
 static const float kNoReflectionHit = 2;
-static const float kExitInset = 0.995;
-static const float kStretchedExitWeight = 0.85;
-static const float kExitSkyDepthFraction = 0.99;
-static const float kTopExitBand = 0.02;
+static const float kDirectionFallbackWeight = 0.9;
+static const float kDirectionFallbackEdge = 0.1;
 
 struct ReflectionRay
 {
@@ -60,32 +59,23 @@ float2 RayUv(ReflectionRay ray, float s)
     return CopyUv(lerp(ray.startPixel, ray.vanishingPixel, s));
 }
 
-float AxisExtent(float start, float travel, float low, float high)
+float4 SceneInReflectedDirection(ReflectionRay ray, out float2 hitUv)
 {
-    return travel < 0 ? (low - start) / min(travel, -kMinScreenStep) : (high - start) / max(travel, kMinScreenStep);
+    hitUv = CopyUv(ray.vanishingPixel);
+    float2 edge = min(hitUv, 1 - hitUv);
+    float weight = kDirectionFallbackWeight * saturate(min(edge.x, edge.y) / kDirectionFallbackEdge);
+    [branch] if (weight <= 0)
+        return 0;
+    return float4(GammaToLinear(tex2Dlod(sSceneColour, float4(hitUv, 0, 0)).rgb), weight);
 }
 
 float OnScreenExtent(ReflectionRay ray)
 {
-    float2 travel = ray.vanishingPixel - ray.startPixel;
-    float2 low = ViewportOrigin();
-    float2 high = low + ViewportSize();
-    return saturate(min(AxisExtent(ray.startPixel.x, travel.x, low.x, high.x),
-                        AxisExtent(ray.startPixel.y, travel.y, low.y, high.y)));
-}
-
-float EdgeFade(float2 uv)
-{
-    float2 edge = min(uv, 1 - uv);
-    return saturate(min(edge.x, edge.y) / kEdgeFadeWidth);
-}
-
-float ExitStretchWeight(ReflectionRay ray, float extent, out float2 exitUv)
-{
-    exitUv = RayUv(ray, extent * kExitInset);
-    bool leavesThroughTop = extent < 1 && exitUv.y < kTopExitBand;
-    bool exitsOverScene = CopiedViewDepth(sSceneDepth, exitUv) < kExitSkyDepthFraction * MaxFogDistance();
-    return leavesThroughTop && exitsOverScene ? kStretchedExitWeight * EdgeFade(float2(exitUv.x, 0.5)) : 0;
+    float rise = ray.vanishingPixel.y - ray.startPixel.y;
+    float top = ViewportOrigin().y;
+    float bottom = top + ViewportSize().y;
+    float limit = rise < 0 ? (top - ray.startPixel.y) / rise : (bottom - ray.startPixel.y) / max(rise, kMinScreenStep);
+    return saturate(limit);
 }
 
 bool RayBehindScene(ReflectionRay ray, float s)
@@ -120,13 +110,8 @@ float4 TraceScreenReflection(WaterPixel w, float2 pixel, float3 R, out float2 hi
             previous = s;
         }
     }
-    float2 exitUv;
-    float stretch = ExitStretchWeight(ray, extent, exitUv);
     [branch] if (behind == kNoReflectionHit)
-    {
-        hitUv = exitUv;
-        return float4(GammaToLinear(tex2Dlod(sSceneColour, float4(exitUv, 0, 0)).rgb), stretch);
-    }
+        return SceneInReflectedDirection(ray, hitUv);
     [loop] for (int refinement = 0; refinement < kReflectionRefinements; ++refinement)
     {
         float middle = 0.5 * (front + behind);
@@ -136,7 +121,8 @@ float4 TraceScreenReflection(WaterPixel w, float2 pixel, float3 R, out float2 hi
     }
     float2 uv = RayUv(ray, behind);
     hitUv = uv;
-    return float4(GammaToLinear(tex2Dlod(sSceneColour, float4(uv, 0, 0)).rgb), max(EdgeFade(uv), stretch));
+    float fade = saturate(1 - saturate((max(uv.y, 1 - uv.y) - kVerticalFadeStart) * kVerticalFadeRate));
+    return float4(GammaToLinear(tex2Dlod(sSceneColour, float4(uv, 0, 0)).rgb), fade);
 }
 #else
 float4 TraceScreenReflection(WaterPixel w, float2 pixel, float3 R, out float2 hitUv)
