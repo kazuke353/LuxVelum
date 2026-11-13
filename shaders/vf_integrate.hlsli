@@ -32,6 +32,7 @@ static const bool kShadowsSunlight = SUN_SHADOW;
 
 
 float4 cLight : register(c9);
+float4 cSunShadow : register(c10);
 float4 cMarch : register(c11);
 float4 cLayers[kFogLayers * kRegistersPerLayer] : register(c12);
 
@@ -223,6 +224,11 @@ float UnpackSunVisibility(float jitterAndSun)
     return floor(jitterAndSun) / kSunVisibilityLevels;
 }
 
+float SunShadowStrength()
+{
+    return cSunShadow.x;
+}
+
 float StepSunVisibility(float sunVisibility, float stepMiddle, float marchLength)
 {
     float shadowEnd = SunShadowEnd(marchLength);
@@ -371,7 +377,9 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     MarchRay ray = {viewDirection, directionWorld, cameraWorld.z, riseLevelledAtHorizon};
     ChordCoverage lightCoverage = {0, false, 0, LocalLightCount()};
     float4 lightDensityScales = LayerLightDensityScales(skyMask, upward);
-    float sunVisibility = kShadowsSunlight ? SunVisibility(viewDirection, marchLength, jitter) : 1;
+    float sunVisibility = 1;
+    [branch] if (kShadowsSunlight && SunShadowStrength() > 0)
+        sunVisibility = lerp(1, SunVisibility(viewDirection, marchLength, jitter), SunShadowStrength());
     float jitterAndSun = PackJitterAndSunVisibility(jitter, sunVisibility);
 
     float layersEnd = LayersMarchEnd();

@@ -1389,7 +1389,9 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
     SetTarget(dev, m_marchTarget);
     const Float4 celestialLight = {toLightInView[0], toLightInView[1], toLightInView[2], fog.lightAboveHorizon};
     const Float4 march = {cfg.temporal > 0.0f ? 1.0f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip};
+    const Float4 sunShadow = {cfg.sunShadow, 0.0f, 0.0f, 0.0f};
     dev->SetPixelShaderConstantF(9, &celestialLight.x, 1);
+    dev->SetPixelShaderConstantF(10, &sunShadow.x, 1);
     dev->SetPixelShaderConstantF(11, &march.x, 1);
     static_assert(sizeof(FogLayer) == 6 * sizeof(Float4), "FogLayer is six shader registers");
     dev->SetPixelShaderConstantF(12, &fog.layers[0].start, 6 * kFogLayers);
@@ -1490,6 +1492,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
     m_drawnSplitComposite = splitSamples ? CompositeShader(compositeChoice, true) : nullptr;
     dev->SetPixelShader(m_drawnComposite);
     dev->SetPixelShaderConstantF(9, &celestialLight.x, 1);
+    dev->SetPixelShaderConstantF(10, &sunShadow.x, 1);
     dev->SetPixelShaderConstantF(11, &march.x, 1);
     const FogParams compositeMarchFog = marchesLocalLights ? WithMeanNoise(fog) : fog;
     dev->SetPixelShaderConstantF(12, &compositeMarchFog.layers[0].start, 6 * kFogLayers);

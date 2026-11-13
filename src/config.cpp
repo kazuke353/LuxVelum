@@ -76,6 +76,7 @@ const FloatSetting kFloatSettings[] = {
     {"GroundFog", &Config::groundFog, 0.0f, 10.0f},
     {"FarFog", &Config::farFog, 0.0f, 10.0f},
     {"SunScatter", &Config::sunScatter, 0.0f, 10.0f},
+    {"SunShadow", &Config::sunShadow, 0.0f, 1.0f},
     {"Ambient", &Config::ambient, 0.0f, 10.0f},
     {"Exposure", &Config::exposure, 0.0f, 10.0f},
     {"ClassicExposure", &Config::classicExposure, 0.0f, 10.0f},

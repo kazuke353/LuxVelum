@@ -190,6 +190,8 @@ bool DrawLight(Config& c)
     if (!section)
         return false;
     bool changed = Multiplier("Sun scatter", c.sunScatter, "In-scattered sun or moon light: the halo around it");
+    changed |= Slider("Sun shadow", c.sunShadow, 0.0f, 1.0f, "%.2f",
+                      "How much walls, hills and buildings between the fog and the sun or moon darken that halo");
     changed |= Multiplier("Ambient", c.ambient, "Ambient fog brightness");
     changed |= Multiplier("Exposure", c.exposure, "Brightness of the layers used where no Classic data exists");
     changed |= Multiplier("Classic exposure", c.classicExposure, "Brightness of the Classic layers, 1 = default");
