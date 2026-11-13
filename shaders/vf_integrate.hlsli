@@ -15,6 +15,17 @@ static const int kRegistersPerLayer = 6;
 static const float kGoldenRatioFraction = 0.618034;
 static const bool kMarchesLocalLights = LOCAL_LIGHTS;
 static const bool kUnrollsLayers = !kMarchesLocalLights;
+static const int kSunShadowPoints = 6;
+static const int kSunShadowSteps = 10;
+static const float kSunShadowRange = 400;
+static const float kSunShadowFirstStep = 1.5;
+static const float kSunShadowStepGrowth = 1.6;
+static const float kSunShadowMinThickness = 15;
+static const float kSunShadowThicknessPerYard = 0.35;
+static const float kSunShadowNearViewZ = 0.5;
+
+static float gSunVisibility = 1;
+static float gSunShadowEnd = 0;
 
 float4 cLight : register(c9);
 float4 cMarch : register(c11);
@@ -148,6 +159,52 @@ float LayerPhase(FogLayer layer, float cosAngle)
     return lerp(PhaseHG(layer.g, cosAngle), 1, layer.isotropic);
 }
 
+float2 ViewToPixel(float3 viewPosition)
+{
+    return NdcToPixel(viewPosition.xy / viewPosition.z * ViewToNdcScale() + ViewToNdcOffset());
+}
+
+bool SunRayBlocked(float3 viewPosition, float3 toLight, float jitter)
+{
+    float travelled = kSunShadowFirstStep * (0.5 + jitter);
+    [loop] for (int k = 0; k < kSunShadowSteps; k++)
+    {
+        float3 probe = viewPosition + toLight * travelled;
+        travelled *= kSunShadowStepGrowth;
+        [branch] if (probe.z < kSunShadowNearViewZ)
+            return false;
+        float2 pixel = ViewToPixel(probe);
+        [branch] if (OutsideViewport(pixel))
+            return false;
+        float depth = SampleDepth(sDepth, pixel);
+        [branch] if (IsSky(depth))
+            continue;
+        float sceneZ = LinearDepth(depth);
+        float thickness = max(kSunShadowMinThickness, probe.z * kSunShadowThicknessPerYard);
+        [branch] if (sceneZ < probe.z && sceneZ > probe.z - thickness)
+            return true;
+    }
+    return false;
+}
+
+void PrepareSunShadow(float3 viewDirection, float marchLength, float jitter)
+{
+    gSunShadowEnd = min(marchLength, kSunShadowRange);
+    float3 toLight = DirectionToLightView();
+    float lit = 0;
+    [loop] for (int i = 0; i < kSunShadowPoints; i++)
+    {
+        float along = gSunShadowEnd * (i + jitter) / kSunShadowPoints;
+        lit += SunRayBlocked(viewDirection * along, toLight, frac(jitter + i * kGoldenRatioFraction)) ? 0 : 1;
+    }
+    gSunVisibility = lit / kSunShadowPoints;
+}
+
+float SunVisibilityAt(float sampleDistance)
+{
+    return lerp(gSunVisibility, 1, saturate((sampleDistance - gSunShadowEnd * 0.75) / (gSunShadowEnd * 0.25 + 1e-3)));
+}
+
 struct MarchRay
 {
     float3 viewDirection;
@@ -213,7 +270,7 @@ void AccumulateLayer(FogLayer layer, int layerIndex, float noiseDensity, float c
     float variation = 1;
     [branch] if (layer.densityVariation > 0 && cDensityVariation.x > 0)
         variation = WeightedVariation(LayerVariation(stepVariation, ray, sampleDistance), layer.densityVariation);
-    float directLight = 1 - shadow;
+    float directLight = (1 - shadow) * SunVisibilityAt(sampleDistance);
     float layerOpticalDepth = layer.density * skyDensityScale * layerLength * distanceCurve * heightProfile *
                               shadowDensityScale * variation * noiseDensity;
     float3 emissive = lerp(layer.emissive, layer.shadowEmissive, shadow);
@@ -289,6 +346,7 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     MarchRay ray = {viewDirection, directionWorld, cameraWorld.z, riseLevelledAtHorizon};
     ChordCoverage lightCoverage = {0, false, 0, LocalLightCount()};
     float4 lightDensityScales = LayerLightDensityScales(skyMask, upward);
+    PrepareSunShadow(viewDirection, marchLength, jitter);
 
     float layersEnd = LayersMarchEnd();
     float3 inScatteredRadiance = 0;
