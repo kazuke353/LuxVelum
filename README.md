@@ -826,7 +826,14 @@ Forever in the game, so by default colours still differ from Classic.
   https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx9-graphics-reference-asm-ps-3-0), and lower
   quality does not reduce that. An unsupported required shader disables volumetric fog for that device and logs
   its name, HRESULT and the shader caps; native fog remains the fallback.
-- Scene geometry does not shadow the fog's sunlight.
+- Scene geometry shadows the fog's sunlight only through the screen: before the march, six points along the first
+  800 yd of each view ray step toward the light (14 growing steps, about 1800 yd) against the depth buffer and count
+  as shadowed when a step crosses behind a surface (`SunShadow` scales the effect). Geometry off screen or behind
+  the camera cannot shadow, and the noisy composites' full-resolution march stays unshadowed (ps_3_0 temp limit).
+  On an AMD RX 6700 XT the shaders' `defi` loop counts did not hold against integer constants the client sets
+  (the march's probe loop ran short, the composite's 4-tap upsample loop too), so every pixel shader is created
+  and bound through `shader_integer_constants`, which sets its `defi` values from the bytecode, and the recorded
+  state blocks include the 16 integer registers so the client's values come back.
 - Local lighting captures the current M2 scene's point-light table. It does not create spotlight cones or local
   shadows, and coverage of WMO-only lights is unverified. A light's sphere is capped at 200 yd and its attenuation
   denominator floored at 1; it is a candidate at any camera distance while its sphere meets the view and the client
@@ -856,7 +863,9 @@ Forever in the game, so by default colours still differ from Classic.
   for the continent cap is unknown. Without the key in the INI it stays off.
 - Modern water: water seen from below keeps the client's look; rivers have no flow direction (the client has no
   flow maps), so Forever's river foam is omitted; the surface stays flat and only its shading moves; reflections are
-  screen-space, so what is off screen falls back to the sky colours; interiors are detected by liquid type only.
+  screen-space: hits fade at every screen edge, and a ray that leaves the screen over scene geometry keeps the exit
+  colour (weight 0.85) instead of the sky colours, which remain the fallback where it leaves over the sky;
+  interiors are detected by liquid type only.
 - The noise column mapping, the noise volume and `ClassicPhase`'s normalisation are inferred; `ClassicPhase` stays 0.
 - `ForeverGlow` sets only the amount: the client's glow adds `g·blur²`, Forever's a linear term.
 - Ripples are harness-checked only; walkers (2.5 yd/s) push a mound rather than a V, and every unit is stamped round.

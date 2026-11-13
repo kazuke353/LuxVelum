@@ -145,6 +145,7 @@ add_library(LuxVelum SHARED
     src/overlay.cpp
     src/renderer.cpp
     src/settings_panel.cpp
+    src/shader_integer_constants.cpp
     src/status_log.cpp
     src/transparent_fog.cpp
     src/water_contacts.cpp
@@ -169,7 +170,7 @@ add_executable(vfog_harness tests/harness.cpp src/client_code.cpp src/client_lig
                src/engine_lights.cpp src/local_light_stabiliser.cpp
                src/fog_data.cpp src/fog_model.cpp src/gpu_timing.cpp src/log.cpp src/noise_volume.cpp
                src/transparent_fog.cpp src/water_contacts.cpp src/water_data.cpp src/water_spectrum.cpp
-               src/water_fft.cpp src/water_ripples.cpp src/status_log.cpp)
+               src/water_fft.cpp src/water_ripples.cpp src/status_log.cpp src/shader_integer_constants.cpp)
 target_include_directories(vfog_harness PRIVATE src ${SHADER_OUT})
 target_compile_definitions(vfog_harness PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(vfog_harness PRIVATE LuxVelum user32 ole32 windowscodecs)

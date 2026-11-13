@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "shader_integer_constants.h"
 
 #include "fog_data.h"
 #include "fog_model.h"
@@ -593,7 +594,7 @@ bool Renderer::EnsureShaders(IDirect3DDevice9* dev)
         for (const PixelShaderRequest& shader : pixels)
         {
             failedName = shader.name;
-            result = dev->CreatePixelShader(reinterpret_cast<const DWORD*>(shader.code), shader.output);
+            result = CreatePixelShaderWithIntegerConstants(dev, shader.code, shader.output);
             if (FAILED(result))
                 break;
         }
@@ -645,10 +646,10 @@ bool Renderer::EnsureSplitComposites(IDirect3DDevice9* dev)
     HRESULT result = D3D_OK;
     for (size_t family = 0; family < std::size(shaders) && SUCCEEDED(result); ++family)
         for (int quality = 0; quality < kQualityLevels && SUCCEEDED(result); ++quality)
-            result = dev->CreatePixelShader(reinterpret_cast<const DWORD*>(code[family][quality]),
+            result = CreatePixelShaderWithIntegerConstants(dev, code[family][quality],
                                             &shaders[family][quality]);
     if (SUCCEEDED(result))
-        result = dev->CreatePixelShader(reinterpret_cast<const DWORD*>(g_ps_silhouette_mask), &m_silhouetteMask);
+        result = CreatePixelShaderWithIntegerConstants(dev, g_ps_silhouette_mask, &m_silhouetteMask);
     if (SUCCEEDED(result))
         return true;
     ReleaseSplitComposites();
@@ -684,7 +685,7 @@ void Renderer::MarkSilhouetteSamples(IDirect3DDevice9* dev, IDirect3DSurface9* s
     dev->SetDepthStencilSurface(sampleDepth);
     dev->SetViewport(&fullDepthRange);
     dev->Clear(1, &world, D3DCLEAR_STENCIL, 0, 1.0f, kUnmarkedSamples);
-    dev->SetPixelShader(m_silhouetteMask);
+    SetPixelShaderWithIntegerConstants(dev, m_silhouetteMask);
     dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
     dev->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
     dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESS);
@@ -709,7 +710,7 @@ void Renderer::DrawSamplesMarked(IDirect3DDevice9* dev, DWORD marker, IDirect3DP
                                  const float* side)
 {
     dev->SetRenderState(D3DRS_STENCILREF, marker);
-    dev->SetPixelShader(shader);
+    SetPixelShaderWithIntegerConstants(dev, shader);
     if (side)
         dev->SetPixelShaderConstantF(kSampleSideRegister, side, 1);
     DrawFullscreenTriangle(dev);
@@ -726,7 +727,7 @@ void Renderer::DrawCompositeBySampleDepth(IDirect3DDevice9* dev, IDirect3DSurfac
     {
         dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
         dev->SetDepthStencilSurface(nullptr);
-        dev->SetPixelShader(CompositeShader(choice, false));
+        SetPixelShaderWithIntegerConstants(dev, CompositeShader(choice, false));
         DrawFullscreenTriangle(dev);
         dev->SetDepthStencilSurface(sampleDepth);
         dev->SetRenderState(D3DRS_STENCILENABLE, TRUE);
@@ -756,7 +757,8 @@ bool Renderer::EnsureStateBlock(IDirect3DDevice9* dev)
     }
     float zeros[kPixelConstants * 4] = {};
     dev->SetVertexShader(nullptr);
-    dev->SetPixelShader(nullptr);
+    SetPixelShaderWithIntegerConstants(dev, nullptr);
+    ClearPixelShaderIntegerConstants(dev);
     dev->SetPixelShaderConstantF(0, zeros, kPixelConstants);
     dev->SetVertexDeclaration(m_decl);
     dev->SetStreamSource(0, nullptr, 0, 0);
@@ -866,7 +868,7 @@ bool Renderer::EnsureDepthProbe(IDirect3DDevice9* dev)
     if (m_probeFailed)
         return false;
     const bool ready =
-        (m_probe || SUCCEEDED(dev->CreatePixelShader(reinterpret_cast<const DWORD*>(g_ps_probe), &m_probe))) &&
+        (m_probe || SUCCEEDED(CreatePixelShaderWithIntegerConstants(dev, g_ps_probe, &m_probe))) &&
         (m_probeTarget || CreateTarget(dev, kProbePoints, 1, D3DFMT_A32B32G32R32F, &m_probeTarget)) &&
         (m_probeReadback || SUCCEEDED(dev->CreateOffscreenPlainSurface(kProbePoints, 1, D3DFMT_A32B32G32R32F,
                                                                         D3DPOOL_SYSTEMMEM, &m_probeReadback,
@@ -893,7 +895,7 @@ void Renderer::IssueDepthProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTe
     dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
     dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
-    dev->SetPixelShader(m_probe);
+    SetPixelShaderWithIntegerConstants(dev, m_probe);
     BindTexture(dev, 0, depthTexture, false);
     BindTexture(dev, 1, fog, false);
     DrawFullscreenTriangle(dev);
@@ -1003,7 +1005,7 @@ IDirect3DTexture9* Renderer::FilterWithHistory(IDirect3DDevice9* dev, IDirect3DT
 {
     const int write = m_historyIndex ^ 1;
     SetTarget(dev, m_history[write]);
-    dev->SetPixelShader(m_temporal);
+    SetPixelShaderWithIntegerConstants(dev, m_temporal);
     const Float4 temporal = {historyWeight, historyValid ? 1.0f : 0.0f, m_adaptiveLightingHistory ? 1.0f : 0.0f,
                              0.0f};
     dev->SetPixelShaderConstantF(9, viewToPreviousClip, 4);
@@ -1016,7 +1018,7 @@ IDirect3DTexture9* Renderer::FilterWithHistory(IDirect3DDevice9* dev, IDirect3DT
 
     BindTexture(dev, 3, nullptr, false);
     SetTarget(dev, m_historyDepth);
-    dev->SetPixelShader(m_historyDepthShader);
+    SetPixelShaderWithIntegerConstants(dev, m_historyDepthShader);
     BindTexture(dev, 0, depthTexture, false);
     DrawFullscreenTriangle(dev);
     m_historyIndex = write;
@@ -1221,7 +1223,7 @@ void Renderer::DrawGodRayMask(IDirect3DDevice9* dev, IDirect3DTexture9* depthTex
 {
     const D3DVIEWPORT9& vp = rays.viewport;
     SetTarget(dev, m_rays[1]);
-    dev->SetPixelShader(m_rayMask);
+    SetPixelShaderWithIntegerConstants(dev, m_rayMask);
     const Float4 mask[2] = {
         {rays.toLightInView[0], rays.toLightInView[1], rays.toLightInView[2], kRayFalloff},
         {0.0f, kRayThreshold, 1.0f / m_rayW, 1.0f / m_rayH},
@@ -1235,7 +1237,7 @@ void Renderer::DrawGodRayMask(IDirect3DDevice9* dev, IDirect3DTexture9* depthTex
     for (int k = 0; k < kRayTaps; ++k)
         norm += std::pow(kRayDecay, static_cast<float>(k));
     const float sunUv[2] = {(rays.sunPx[0] - vp.X) / vp.Width, (rays.sunPx[1] - vp.Y) / vp.Height};
-    dev->SetPixelShader(m_rayBlur);
+    SetPixelShaderWithIntegerConstants(dev, m_rayBlur);
     float step = kRayStep;
     for (int pass = 0; pass < 2; ++pass)
     {
@@ -1269,7 +1271,7 @@ bool Renderer::DrawGodRaysOverScene(IDirect3DDevice9* dev, const SceneDepth& dep
     dev->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
     dev->SetRenderState(D3DRS_COLORWRITEENABLE,
                         D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
-    dev->SetPixelShader(m_rayComposite);
+    SetPixelShaderWithIntegerConstants(dev, m_rayComposite);
     const Float4 composite[3] = {
         {0.0f, rays.strength, 0.0f, 0.0f},
         {rays.colour[0], rays.colour[1], rays.colour[2], 0.0f},
@@ -1438,7 +1440,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
     IDirect3DPixelShader9* const* marches = marchesLocalLights ? (samplesNoise ? m_litNoisyMarch : m_litMarch)
                                                                : (samplesNoise ? m_noisyMarch : m_march);
     m_drawnMarch = marches[std::clamp(cfg.quality, 1, 3) - 1];
-    dev->SetPixelShader(m_drawnMarch);
+    SetPixelShaderWithIntegerConstants(dev, m_drawnMarch);
     dev->SetPixelShaderConstantF(53, &localControl.x, 1);
     BindTexture(dev, 8, m_localLightData, false);
     if (cfg.noiseAmount > 0.0f && !m_densityNoise)
@@ -1491,7 +1493,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
     const bool splitSamples = depth.Multisampled() && EnsureSplitComposites(dev);
     m_drawnComposite = CompositeShader(compositeChoice, false);
     m_drawnSplitComposite = splitSamples ? CompositeShader(compositeChoice, true) : nullptr;
-    dev->SetPixelShader(m_drawnComposite);
+    SetPixelShaderWithIntegerConstants(dev, m_drawnComposite);
     dev->SetPixelShaderConstantF(9, &celestialLight.x, 1);
     dev->SetPixelShaderConstantF(10, &sunShadow.x, 1);
     dev->SetPixelShaderConstantF(11, &march.x, 1);

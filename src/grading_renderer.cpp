@@ -1,4 +1,5 @@
 #include "grading_renderer.h"
+#include "shader_integer_constants.h"
 
 #include "fullscreen_triangle.h"
 #include "log.h"
@@ -145,7 +146,7 @@ bool GradingRenderer::EnsureShaders(IDirect3DDevice9* dev)
     };
     HRESULT result = dev->CreateVertexShader(reinterpret_cast<const DWORD*>(g_vs_fullscreen), &m_vs);
     if (SUCCEEDED(result))
-        result = dev->CreatePixelShader(reinterpret_cast<const DWORD*>(g_ps_grade), &m_ps);
+        result = CreatePixelShaderWithIntegerConstants(dev, g_ps_grade, &m_ps);
     if (SUCCEEDED(result))
         result = dev->CreateVertexDeclaration(kElements, &m_decl);
     if (SUCCEEDED(result))
@@ -175,7 +176,8 @@ bool GradingRenderer::EnsureStateBlock(IDirect3DDevice9* dev)
     }
     const float zeros[kGradingConstants * 4] = {};
     dev->SetVertexShader(nullptr);
-    dev->SetPixelShader(nullptr);
+    SetPixelShaderWithIntegerConstants(dev, nullptr);
+    ClearPixelShaderIntegerConstants(dev);
     dev->SetPixelShaderConstantF(0, zeros, kGradingConstants);
     dev->SetVertexDeclaration(m_decl);
     dev->SetStreamSource(0, nullptr, 0, 0);
@@ -278,7 +280,7 @@ void GradingRenderer::SetGradingState(IDirect3DDevice9* dev, const D3DVIEWPORT9&
     dev->SetViewport(&world);
     dev->SetScissorRect(&scissor);
     dev->SetVertexShader(m_vs);
-    dev->SetPixelShader(m_ps);
+    SetPixelShaderWithIntegerConstants(dev, m_ps);
     dev->SetVertexDeclaration(m_decl);
     BindPointSampled(dev, kSceneStage, m_sceneCopy);
     BindPointSampled(dev, kCurveStage, m_curve);

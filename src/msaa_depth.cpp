@@ -1,4 +1,5 @@
 #include "msaa_depth.h"
+#include "shader_integer_constants.h"
 
 #include "fullscreen_triangle.h"
 #include "log.h"
@@ -200,7 +201,7 @@ void RestoreReszState(IDirect3DDevice9* dev, ReszSavedState& saved)
         dev->SetRenderState(kReszStates[i], saved.states[i]);
     dev->SetTexture(0, saved.texture);
     dev->SetVertexShader(saved.vertexShader);
-    dev->SetPixelShader(saved.pixelShader);
+    SetPixelShaderWithIntegerConstants(dev, saved.pixelShader);
     dev->SetVertexDeclaration(saved.declaration);
     if (saved.fvf)
         dev->SetFVF(saved.fvf);
@@ -217,7 +218,7 @@ bool ResolveThroughResz(IDirect3DDevice9* dev, IDirect3DTexture9* destination)
     ReszSavedState saved;
     SaveReszState(dev, saved);
     dev->SetVertexShader(nullptr);
-    dev->SetPixelShader(nullptr);
+    SetPixelShaderWithIntegerConstants(dev, nullptr);
     dev->SetFVF(D3DFVF_XYZ);
     dev->SetTexture(0, destination);
     dev->SetRenderState(D3DRS_ZENABLE, FALSE);
@@ -263,7 +264,7 @@ bool CreateDepthReadback(IDirect3DDevice9* dev, UINT texels, DepthReadback& r)
         D3DDECL_END(),
     };
     return SUCCEEDED(dev->CreateVertexShader(reinterpret_cast<const DWORD*>(g_vs_fullscreen), &r.vertexShader)) &&
-           SUCCEEDED(dev->CreatePixelShader(reinterpret_cast<const DWORD*>(g_ps_depth_check), &r.pixelShader)) &&
+           SUCCEEDED(CreatePixelShaderWithIntegerConstants(dev, g_ps_depth_check, &r.pixelShader)) &&
            SUCCEEDED(dev->CreateVertexDeclaration(kElements, &r.declaration)) &&
            SUCCEEDED(dev->CreateTexture(texels, 1, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &r.target,
                                         nullptr)) &&
@@ -327,7 +328,7 @@ void SetReadbackState(IDirect3DDevice9* dev, const DepthReadback& r, IDirect3DTe
     dev->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
     dev->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
     dev->SetVertexShader(r.vertexShader);
-    dev->SetPixelShader(r.pixelShader);
+    SetPixelShaderWithIntegerConstants(dev, r.pixelShader);
     dev->SetVertexDeclaration(r.declaration);
     dev->SetStreamSourceFreq(0, 1);
     dev->SetTexture(0, depth);
