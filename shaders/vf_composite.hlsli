@@ -18,6 +18,11 @@ static const float4 kSunMarkerColour = float4(1, 0, 0, 1);
 static const float kDebugRadiance = 1;
 static const float kDebugTransmittance = 2;
 static const float kDebugLinearDepth = 3;
+static const float kDebugSunShadow = 4;
+
+#ifndef SPLIT_SAMPLES
+#define SPLIT_SAMPLES 0
+#endif
 static const float kSameSurfaceAbsoluteDepth = 0.5;
 static const float kSameSurfaceRelativeDepth = 0.02;
 static const float kTapPlaneRelativeDepth = 0.005;
@@ -342,6 +347,11 @@ float4 CompositeAtDepth(float2 pixel, float depth)
             return float4(1 - fog.aaa, 1);
         if (DebugViewAtMost(kDebugLinearDepth))
             return float4(saturate(viewZ / MaxFogDistance()).xxx, 1);
+#if !SPLIT_SAMPLES && !LOCAL_LIGHTS
+        float3 viewRay = ViewRayAtUnitDepth(pixel);
+        float rayLength = min(viewZ * length(viewRay), MaxFogDistance());
+        return float4(SunVisibility(normalize(viewRay), rayLength, 0.5).xxx, 1);
+#endif
     }
     [branch] if (SunMarkerEnabled() && distance(pixel, SunPixel()) < kSunMarkerRadius)
         return kSunMarkerColour;
