@@ -30,6 +30,7 @@ static const float kNoReflectionHit = 2;
 static const float kExitInset = 0.995;
 static const float kStretchedExitWeight = 0.85;
 static const float kExitSkyDepthFraction = 0.99;
+static const float kTopExitBand = 0.02;
 
 struct ReflectionRay
 {
@@ -82,9 +83,9 @@ float EdgeFade(float2 uv)
 float ExitStretchWeight(ReflectionRay ray, float extent, out float2 exitUv)
 {
     exitUv = RayUv(ray, extent * kExitInset);
-    bool leavesScreen = extent < 1;
+    bool leavesThroughTop = extent < 1 && exitUv.y < kTopExitBand;
     bool exitsOverScene = CopiedViewDepth(sSceneDepth, exitUv) < kExitSkyDepthFraction * MaxFogDistance();
-    return leavesScreen && exitsOverScene ? kStretchedExitWeight : 0;
+    return leavesThroughTop && exitsOverScene ? kStretchedExitWeight * EdgeFade(float2(exitUv.x, 0.5)) : 0;
 }
 
 bool RayBehindScene(ReflectionRay ray, float s)
