@@ -23,6 +23,7 @@ static const float kSunShadowStepGrowth = 1.6;
 static const float kSunShadowMinThickness = 15;
 static const float kSunShadowThicknessPerYard = 0.35;
 static const float kSunShadowNearViewZ = 0.5;
+static const bool kShadowsSunlight = !kSamplesAuthoredNoise;
 
 
 float4 cLight : register(c9);
@@ -351,7 +352,7 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     MarchRay ray = {viewDirection, directionWorld, cameraWorld.z, riseLevelledAtHorizon};
     ChordCoverage lightCoverage = {0, false, 0, LocalLightCount()};
     float4 lightDensityScales = LayerLightDensityScales(skyMask, upward);
-    float sunVisibility = SunVisibility(viewDirection, marchLength, jitter);
+    float sunVisibility = kShadowsSunlight ? SunVisibility(viewDirection, marchLength, jitter) : 1;
 
     float layersEnd = LayersMarchEnd();
     float3 inScatteredRadiance = 0;
@@ -368,7 +369,8 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
         float3 stepRadiance = 0;
         float stepOpticalDepth = 0;
         float4 noiseDensities = LayerNoiseDensities(StepSamplePosition(ray, stepStart, stepEnd, jitter));
-        float sunScale = StepSunVisibility(sunVisibility, 0.5 * (stepStart + stepEnd), marchLength);
+        float sunScale = kShadowsSunlight ? StepSunVisibility(sunVisibility, 0.5 * (stepStart + stepEnd), marchLength)
+                                          : 1;
         AccumulateLayers(noiseDensities, cosToLight, sunScale, skyMask, upward, stepStart, stepEnd, jitter, ray,
                          stepRadiance, stepOpticalDepth);
         [branch] if (kMarchesLocalLights && lightCoverage.nextEndpoint <= stepStart)
