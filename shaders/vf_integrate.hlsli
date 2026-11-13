@@ -230,43 +230,17 @@ float UnpackSunVisibility(float jitterAndSun)
 
 float4 SunProbeOutcomes(float3 viewDirection, float marchLength)
 {
-    float4 outcomes = float4(0, 0, 0, 1);
-    [loop] for (int i = 0; i < kSunShadowPoints; i++)
+    float3 probe = viewDirection * (SunShadowEnd(marchLength) * 0.5 / kSunShadowPoints);
+    float stride = kSunShadowFirstStep;
+    [unroll] for (int k = 0; k < 7; k++)
     {
-        float3 probe = viewDirection * (SunShadowEnd(marchLength) * (i + 0.5) / kSunShadowPoints);
-        float stride = kSunShadowFirstStep;
-        float outcome = 3;
-        [loop] for (int k = 0; k < kSunShadowSteps; k++)
-        {
-            float previousZ = probe.z;
-            probe += DirectionToLightView() * stride;
-            stride *= kSunShadowStepGrowth;
-            [branch] if (probe.z < kSunShadowNearViewZ)
-            {
-                outcome = 2;
-                break;
-            }
-            float2 pixel = ViewToPixel(probe);
-            [branch] if (OutsideViewport(pixel))
-            {
-                outcome = 1;
-                break;
-            }
-            float depth = SampleDepth(sDepth, pixel);
-            [branch] if (IsSky(depth))
-                continue;
-            float sceneZ = LinearDepth(depth);
-            float thickness = max(kSunShadowMinThickness, sceneZ * kSunShadowThicknessPerYard);
-            [branch] if (probe.z > sceneZ && previousZ < sceneZ + thickness)
-            {
-                outcome = 0;
-                break;
-            }
-        }
-        outcomes += float4(outcome == 0, outcome == 1, outcome == 2, 0) / kSunShadowPoints;
+        probe += DirectionToLightView() * stride;
+        stride *= kSunShadowStepGrowth;
     }
-    outcomes.a = cSunShadow.x;
-    return outcomes;
+    float2 pixel = ViewToPixel(probe);
+    float depth = SampleDepth(sDepth, pixel);
+    return float4(depth > 0.9 ? (depth - 0.9) * 10 : 0, probe.z / 100, LinearDepth(depth) / 100,
+                  pixel.y / ViewportSize().y);
 }
 
 float SunShadowStrength()
