@@ -1,4 +1,3 @@
-#define MARCH_PASS 1
 #include "vf_integrate.hlsli"
 
 float4 main(float2 lowResTexel : VPOS) : COLOR0

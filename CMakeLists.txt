@@ -64,6 +64,7 @@ vf_shader(ps_lit_noisy_march_mid vf_march.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=
 vf_shader(ps_lit_noisy_march_high vf_march.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=1 /DSAMPLES_AUTHORED_NOISE=1)
 vf_shader(ps_density_probe vf_density_probe.hlsl ps_3_0)
 vf_shader(ps_temporal vf_temporal.hlsl ps_3_0)
+vf_shader(ps_sun_shadow vf_sun_shadow.hlsl ps_3_0)
 vf_shader(ps_history_depth vf_history_depth.hlsl ps_3_0)
 vf_shader(ps_composite_low vf_composite.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=0)
 vf_shader(ps_composite_mid vf_composite.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=0)

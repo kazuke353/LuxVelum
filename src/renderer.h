@@ -99,6 +99,7 @@ private:
                          const FogParams& fog, const AuthoredFog& authored, const D3DSURFACE_DESC& depthDesc,
                          const float* viewToWorld, const float* toLightInView, const float* sunPx, float rayStrength);
     void BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex, bool linear);
+    void DrawSunShadow(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, bool enabled);
     void BindWrappedVolume(IDirect3DDevice9* dev, DWORD stage, IDirect3DVolumeTexture9* volume);
     FogParams DrawableFog(IDirect3DDevice9* dev, const FogParams& fog);
     void UploadLayerNoise(IDirect3DDevice9* dev, const FogParams& fog, const float* camera, long long now);
@@ -129,10 +130,12 @@ private:
     IDirect3DPixelShader9* m_rayBlur = nullptr;
     IDirect3DPixelShader9* m_rayComposite = nullptr;
     IDirect3DPixelShader9* m_probe = nullptr;
+    IDirect3DPixelShader9* m_sunShadow = nullptr;
     IDirect3DVertexDeclaration9* m_decl = nullptr;
     IDirect3DStateBlock9* m_state = nullptr;
 
     IDirect3DTexture9* m_marchTarget = nullptr;
+    IDirect3DTexture9* m_sunShadowTarget = nullptr;
     IDirect3DTexture9* m_history[2] = {};
     IDirect3DTexture9* m_historyDepth = nullptr;
     IDirect3DTexture9* m_rays[2] = {};

@@ -6,10 +6,6 @@
 #define STEPS 24
 #endif
 
-#ifndef MARCH_PASS
-#define MARCH_PASS 0
-#endif
-
 #ifndef SUN_SHADOW
 #define SUN_SHADOW 1
 #endif
@@ -41,6 +37,7 @@ float4 cMarch : register(c11);
 float4 cLayers[kFogLayers * kRegistersPerLayer] : register(c12);
 
 sampler2D sDepth : register(s0);
+sampler2D sSunShadow : register(s11);
 
 struct FogLayer
 {
@@ -231,9 +228,9 @@ float SunShadowStrength()
     return cSunShadow.x;
 }
 
-bool ShowsSunVisibility()
+float SampledSunVisibility(float2 pixel)
 {
-    return cSunShadow.y > 0;
+    return tex2Dlod(sSunShadow, float4(LowResTexelToUv(FullPixelToLowResTexel(pixel)), 0, 0)).r;
 }
 
 float StepSunVisibility(float sunVisibility, float stepMiddle, float marchLength)
@@ -386,7 +383,7 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     float4 lightDensityScales = LayerLightDensityScales(skyMask, upward);
     float sunVisibility = 1;
     [branch] if (kShadowsSunlight && SunShadowStrength() > 0)
-        sunVisibility = lerp(1, SunVisibility(viewDirection, marchLength, jitter), SunShadowStrength());
+        sunVisibility = lerp(1, SampledSunVisibility(pixel), SunShadowStrength());
     float jitterAndSun = PackJitterAndSunVisibility(jitter, sunVisibility);
 
     float layersEnd = LayersMarchEnd();
@@ -424,10 +421,6 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
             transmittance *= 1 - stepOpacity;
         }
     }
-#if MARCH_PASS && !LOCAL_LIGHTS && !SAMPLES_AUTHORED_NOISE
-    [branch] if (ShowsSunVisibility())
-        return float4(UnpackSunVisibility(jitterAndSun).xxx, 0);
-#endif
     return float4(clamp(inScatteredRadiance, 0, 65504), 1 - transmittance);
 }
 

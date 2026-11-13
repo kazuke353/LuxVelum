@@ -43,6 +43,7 @@
 #include "ps_split_composite_low.h"
 #include "ps_split_composite_mid.h"
 #include "ps_temporal.h"
+#include "ps_sun_shadow.h"
 #include "ps_history_depth.h"
 #include "vs_fullscreen.h"
 
@@ -62,10 +63,10 @@ constexpr DWORD kAllStencilBits = 0xFF;
 constexpr DWORD kUnmarkedSamples = 0;
 constexpr DWORD kNearSamples = 1;
 constexpr DWORD kFarSamples = ~kUnmarkedSamples & kAllStencilBits;
-constexpr DWORD kStages = 11;
+constexpr DWORD kStages = 12;
 constexpr UINT kLayerNoiseRegister = 36;
-constexpr int kSunShadowDebugView = 4;
 constexpr DWORD kAuthoredNoiseStage = 10;
+constexpr DWORD kSunShadowStage = 11;
 constexpr double kMaxNoiseStepSeconds = 0.25;
 constexpr UINT kRayScale = 4;
 constexpr float kMinViewportDepthExtent = 0.01f;
@@ -384,6 +385,7 @@ Renderer::~Renderer()
 void Renderer::ReleaseDefaultPool()
 {
     SafeRelease(m_marchTarget);
+    SafeRelease(m_sunShadowTarget);
     SafeRelease(m_history[0]);
     SafeRelease(m_history[1]);
     SafeRelease(m_historyDepth);
@@ -426,6 +428,7 @@ void Renderer::ReleaseAll()
     for (auto*& ps : m_litNoisyMarch)
         SafeRelease(ps);
     SafeRelease(m_temporal);
+    SafeRelease(m_sunShadow);
     SafeRelease(m_historyDepthShader);
     for (auto*& ps : m_composite)
         SafeRelease(ps);
@@ -570,6 +573,7 @@ bool Renderer::EnsureShaders(IDirect3DDevice9* dev)
         {"ps_lit_noisy_march_mid", g_ps_lit_noisy_march_mid, &m_litNoisyMarch[1]},
         {"ps_lit_noisy_march_high", g_ps_lit_noisy_march_high, &m_litNoisyMarch[2]},
         {"ps_temporal", g_ps_temporal, &m_temporal},
+        {"ps_sun_shadow", g_ps_sun_shadow, &m_sunShadow},
         {"ps_history_depth", g_ps_history_depth, &m_historyDepthShader},
         {"ps_composite_low", g_ps_composite_low, &m_composite[0]},
         {"ps_composite_mid", g_ps_composite_mid, &m_composite[1]},
@@ -780,6 +784,7 @@ bool Renderer::EnsureTargets(IDirect3DDevice9* dev, UINT lowW, UINT lowH, UINT r
     if (m_marchTarget && m_lowW == lowW && m_lowH == lowH && m_rayW == rayW && m_rayH == rayH)
         return true;
     SafeRelease(m_marchTarget);
+    SafeRelease(m_sunShadowTarget);
     SafeRelease(m_history[0]);
     SafeRelease(m_history[1]);
     SafeRelease(m_historyDepth);
@@ -797,12 +802,14 @@ bool Renderer::EnsureTargets(IDirect3DDevice9* dev, UINT lowW, UINT lowH, UINT r
     ok = ok && CreateTarget(dev, lowW, lowH, fogFormat, &m_history[0]) &&
          CreateTarget(dev, lowW, lowH, fogFormat, &m_history[1]) &&
          CreateTarget(dev, lowW, lowH, D3DFMT_A8R8G8B8, &m_historyDepth) &&
+         CreateTarget(dev, lowW, lowH, D3DFMT_A8R8G8B8, &m_sunShadowTarget) &&
          CreateTarget(dev, rayW, rayH, D3DFMT_A8R8G8B8, &m_rays[0]) &&
          CreateTarget(dev, rayW, rayH, D3DFMT_A8R8G8B8, &m_rays[1]);
     if (!ok)
     {
         VF_LOG_ERROR("render target creation failed (%ux%u)", lowW, lowH);
         SafeRelease(m_marchTarget);
+        SafeRelease(m_sunShadowTarget);
         SafeRelease(m_history[0]);
         SafeRelease(m_history[1]);
         SafeRelease(m_historyDepth);
@@ -952,6 +959,19 @@ void Renderer::LogFinishedDepthProbe()
         VF_LOG_INFO("  row %d:%s", row, line);
     }
     m_probeReadback->UnlockRect();
+}
+
+void Renderer::DrawSunShadow(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, bool enabled)
+{
+    SetTarget(dev, m_sunShadowTarget);
+    if (!enabled)
+    {
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 255, 255, 255), 1.0f, 0);
+        return;
+    }
+    SetPixelShaderWithIntegerConstants(dev, m_sunShadow);
+    BindTexture(dev, 0, depthTexture, false);
+    DrawFullscreenTriangle(dev);
 }
 
 void Renderer::BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex, bool linear)
@@ -1389,13 +1409,14 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
     PrepareFullscreenPasses(dev);
     dev->SetPixelShaderConstantF(0, &common[0][0], 9);
 
-    SetTarget(dev, m_marchTarget);
     const Float4 celestialLight = {toLightInView[0], toLightInView[1], toLightInView[2], fog.lightAboveHorizon};
     const Float4 march = {cfg.temporal > 0.0f ? 1.0f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip};
-    const Float4 sunShadow = {cfg.sunShadow, cfg.debugView == kSunShadowDebugView ? 1.0f : 0.0f, 0.0f, 0.0f};
+    const Float4 sunShadow = {cfg.sunShadow, 0.0f, 0.0f, 0.0f};
     dev->SetPixelShaderConstantF(9, &celestialLight.x, 1);
     dev->SetPixelShaderConstantF(10, &sunShadow.x, 1);
     dev->SetPixelShaderConstantF(11, &march.x, 1);
+    DrawSunShadow(dev, depthTexture, cfg.sunShadow > 0.0f);
+    SetTarget(dev, m_marchTarget);
     static_assert(sizeof(FogLayer) == 6 * sizeof(Float4), "FogLayer is six shader registers");
     dev->SetPixelShaderConstantF(12, &fog.layers[0].start, 6 * kFogLayers);
     uint32_t pointLightCount = cfg.localLights ? std::min(in.localLights.pointLightCount, kMaxLocalPointLights) : 0;
@@ -1452,6 +1473,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
                               static_cast<float>(std::fmod(TickSeconds(now) * cfg.noiseWindSpeed, windPeriod)), 0.0f};
     dev->SetPixelShaderConstantF(78, &variation.x, 1);
     BindTexture(dev, 0, depthTexture, false);
+    BindTexture(dev, kSunShadowStage, m_sunShadowTarget, true);
     DrawFullscreenTriangle(dev);
 
     m_adaptiveLightingHistory =
@@ -1511,6 +1533,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
     BindTexture(dev, 1, fogResult, false);
     BindTexture(dev, 2, m_rays[1], true);
     BindTexture(dev, 3, sceneBlend ? m_sceneCopy : nullptr, false);
+    BindTexture(dev, kSunShadowStage, m_sunShadowTarget, true);
     BindTexture(dev, 4, m_marchTarget, false);
     if (splitSamples)
         DrawCompositeBySampleDepth(dev, depth.bound, vp, compositeChoice, sceneBlend);
