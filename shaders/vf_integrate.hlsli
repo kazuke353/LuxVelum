@@ -23,7 +23,7 @@ static const float kSunShadowStepGrowth = 1.6;
 static const float kSunShadowMinThickness = 15;
 static const float kSunShadowThicknessPerYard = 0.35;
 static const float kSunShadowNearViewZ = 0.5;
-static const bool kShadowsSunlight = !kSamplesAuthoredNoise;
+static const float kSunVisibilityLevels = 255;
 
 
 float4 cLight : register(c9);
@@ -204,6 +204,21 @@ float SunVisibility(float3 viewDirection, float marchLength, float jitter)
     return lit / kSunShadowPoints;
 }
 
+float PackJitterAndSunVisibility(float jitter, float sunVisibility)
+{
+    return floor(saturate(sunVisibility) * kSunVisibilityLevels + 0.5) + jitter;
+}
+
+float UnpackJitter(float jitterAndSun)
+{
+    return frac(jitterAndSun);
+}
+
+float UnpackSunVisibility(float jitterAndSun)
+{
+    return floor(jitterAndSun) / kSunVisibilityLevels;
+}
+
 float StepSunVisibility(float sunVisibility, float stepMiddle, float marchLength)
 {
     float shadowEnd = SunShadowEnd(marchLength);
@@ -352,7 +367,7 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     MarchRay ray = {viewDirection, directionWorld, cameraWorld.z, riseLevelledAtHorizon};
     ChordCoverage lightCoverage = {0, false, 0, LocalLightCount()};
     float4 lightDensityScales = LayerLightDensityScales(skyMask, upward);
-    float sunVisibility = kShadowsSunlight ? SunVisibility(viewDirection, marchLength, jitter) : 1;
+    float jitterAndSun = PackJitterAndSunVisibility(jitter, SunVisibility(viewDirection, marchLength, jitter));
 
     float layersEnd = LayersMarchEnd();
     float3 inScatteredRadiance = 0;
@@ -368,10 +383,10 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
         float stepEnd = marchLength * endFraction * endFraction;
         float3 stepRadiance = 0;
         float stepOpticalDepth = 0;
-        float4 noiseDensities = LayerNoiseDensities(StepSamplePosition(ray, stepStart, stepEnd, jitter));
-        float sunScale = kShadowsSunlight ? StepSunVisibility(sunVisibility, 0.5 * (stepStart + stepEnd), marchLength)
-                                          : 1;
-        AccumulateLayers(noiseDensities, cosToLight, sunScale, skyMask, upward, stepStart, stepEnd, jitter, ray,
+        float stepJitter = UnpackJitter(jitterAndSun);
+        float4 noiseDensities = LayerNoiseDensities(StepSamplePosition(ray, stepStart, stepEnd, stepJitter));
+        float sunScale = StepSunVisibility(UnpackSunVisibility(jitterAndSun), 0.5 * (stepStart + stepEnd), marchLength);
+        AccumulateLayers(noiseDensities, cosToLight, sunScale, skyMask, upward, stepStart, stepEnd, stepJitter, ray,
                          stepRadiance, stepOpticalDepth);
         [branch] if (kMarchesLocalLights && lightCoverage.nextEndpoint <= stepStart)
             lightCoverage = ChordCoverageFrom(lightCoverage, viewDirection, stepStart, marchLength);
