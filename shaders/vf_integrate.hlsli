@@ -173,27 +173,25 @@ float2 ViewToPixel(float3 viewPosition)
     return NdcToPixel(viewPosition.xy / viewPosition.z * ViewToNdcScale() + ViewToNdcOffset());
 }
 
-bool SunRayBlocked(float3 probe, float stride)
+float SunRayBlocked(float3 probe, float stride)
 {
-    [loop] for (int k = 0; k < kSunShadowSteps; k++)
+    float blocked = 0;
+    float onScreen = 1;
+    [unroll] for (int k = 0; k < kSunShadowSteps; k++)
     {
         float previousZ = probe.z;
         probe += DirectionToLightView() * stride;
         stride *= kSunShadowStepGrowth;
-        [branch] if (probe.z < kSunShadowNearViewZ)
-            return false;
-        float2 pixel = ViewToPixel(probe);
-        [branch] if (OutsideViewport(pixel))
-            return false;
-        float depth = SampleDepth(sDepth, pixel);
-        [branch] if (IsSky(depth))
-            continue;
+        onScreen *= probe.z >= kSunShadowNearViewZ ? 1 : 0;
+        float2 pixel = ViewToPixel(float3(probe.xy, max(probe.z, kSunShadowNearViewZ)));
+        onScreen *= OutsideViewport(pixel) ? 0 : 1;
+        float depth = SampleDepth(sDepth, clamp(pixel, ViewportOrigin(), ViewportLastPixelCentre()));
         float sceneZ = LinearDepth(depth);
         float thickness = max(kSunShadowMinThickness, sceneZ * kSunShadowThicknessPerYard);
-        [branch] if (probe.z > sceneZ && previousZ < sceneZ + thickness)
-            return true;
+        bool crossed = !IsSky(depth) && probe.z > sceneZ && previousZ < sceneZ + thickness;
+        blocked = max(blocked, crossed ? onScreen : 0);
     }
-    return false;
+    return blocked;
 }
 
 float SunShadowEnd(float marchLength)
@@ -208,7 +206,7 @@ float SunVisibility(float3 viewDirection, float marchLength, float jitter)
     {
         float along = SunShadowEnd(marchLength) * (i + jitter) / kSunShadowPoints;
         float stride = kSunShadowFirstStep * (0.5 + frac(jitter + i * kGoldenRatioFraction));
-        lit += SunRayBlocked(viewDirection * along, stride) ? 0 : 1;
+        lit += 1 - SunRayBlocked(viewDirection * along, stride);
     }
     return lit / kSunShadowPoints;
 }
@@ -226,21 +224,6 @@ float UnpackJitter(float jitterAndSun)
 float UnpackSunVisibility(float jitterAndSun)
 {
     return floor(jitterAndSun) / kSunVisibilityLevels;
-}
-
-float4 SunProbeOutcomes(float3 viewDirection, float marchLength)
-{
-    float3 probe = viewDirection * (SunShadowEnd(marchLength) * 0.5 / kSunShadowPoints);
-    float stride = kSunShadowFirstStep;
-    [unroll] for (int k = 0; k < 7; k++)
-    {
-        probe += DirectionToLightView() * stride;
-        stride *= kSunShadowStepGrowth;
-    }
-    float2 pixel = ViewToPixel(probe);
-    float depth = SampleDepth(sDepth, pixel);
-    return float4(depth > 0.9 ? (depth - 0.9) * 10 : 0, probe.z / 100, LinearDepth(depth) / 100,
-                  pixel.y / ViewportSize().y);
 }
 
 float SunShadowStrength()
@@ -443,7 +426,7 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     }
 #if MARCH_PASS && !LOCAL_LIGHTS && !SAMPLES_AUTHORED_NOISE
     [branch] if (ShowsSunVisibility())
-        return SunProbeOutcomes(viewDirection, marchLength);
+        return float4(UnpackSunVisibility(jitterAndSun).xxx, 0);
 #endif
     return float4(clamp(inScatteredRadiance, 0, 65504), 1 - transmittance);
 }
