@@ -1,5 +1,4 @@
 #include "water_ripples.h"
-#include "shader_integer_constants.h"
 
 #include "fullscreen_triangle.h"
 #include "log.h"
@@ -202,7 +201,7 @@ bool WaterRipples::EnsureShaders(IDirect3DDevice9* dev)
     if (SUCCEEDED(result))
         result = dev->CreateVertexDeclaration(kElements, &m_decl);
     if (SUCCEEDED(result))
-        result = CreatePixelShaderWithIntegerConstants(dev, g_ps_vw_ripple_step, &m_step);
+        result = dev->CreatePixelShader(reinterpret_cast<const DWORD*>(g_ps_vw_ripple_step), &m_step);
     if (SUCCEEDED(result))
         return true;
     SafeRelease(m_step);
@@ -304,7 +303,7 @@ void WaterRipples::SetStepState(IDirect3DDevice9* dev)
     dev->SetVertexShader(m_vs);
     dev->SetVertexDeclaration(m_decl);
     dev->SetStreamSourceFreq(0, 1);
-    SetPixelShaderWithIntegerConstants(dev, m_step);
+    dev->SetPixelShader(m_step);
     for (const SamplerSetting& setting : kPointClampSampler)
         dev->SetSamplerState(0, setting.state, setting.value);
 }

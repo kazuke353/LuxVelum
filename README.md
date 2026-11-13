@@ -826,14 +826,13 @@ Forever in the game, so by default colours still differ from Classic.
   https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx9-graphics-reference-asm-ps-3-0), and lower
   quality does not reduce that. An unsupported required shader disables volumetric fog for that device and logs
   its name, HRESULT and the shader caps; native fog remains the fallback.
-- Scene geometry shadows the fog's sunlight only through the screen: before the march, six points along the first
-  800 yd of each view ray step toward the light (14 growing steps, about 1800 yd) against the depth buffer and count
-  as shadowed when a step crosses behind a surface (`SunShadow` scales the effect). Geometry off screen or behind
-  the camera cannot shadow, and the noisy composites' full-resolution march stays unshadowed (ps_3_0 temp limit).
-  On an AMD RX 6700 XT the shaders' `defi` loop counts did not hold against integer constants the client sets
-  (the march's probe loop ran short, the composite's 4-tap upsample loop too), so every pixel shader is created
-  and bound through `shader_integer_constants`, which sets its `defi` values from the bytecode, and the recorded
-  state blocks include the 16 integer registers so the client's values come back.
+- Scene geometry shadows the fog's sunlight only through the screen. A low-resolution pass (`ps_sun_shadow`, stage 11)
+  walks six points along the first 800 yd of each view ray toward the light in 14 growing steps (about 1800 yd)
+  against the depth buffer and counts a point as shadowed when a step crosses behind a surface; the march and the
+  composites' full-resolution march scale the direct light of the steps in that range by the share that reached the
+  light (`SunShadow`, `DebugView=4`). Geometry off screen or behind the camera cannot shadow, and the noisy
+  composites' full-resolution march stays unshadowed (ps_3_0 temp limit). The probe is unrolled without early
+  exits: on an AMD RX 6700 XT the same probe as a loop with `break`/`continue` never reported a crossing.
 - Local lighting captures the current M2 scene's point-light table. It does not create spotlight cones or local
   shadows, and coverage of WMO-only lights is unverified. A light's sphere is capped at 200 yd and its attenuation
   denominator floored at 1; it is a candidate at any camera distance while its sphere meets the view and the client

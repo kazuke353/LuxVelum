@@ -1,5 +1,4 @@
 #include "water_renderer.h"
-#include "shader_integer_constants.h"
 
 #include "fog_model.h"
 #include "fullscreen_triangle.h"
@@ -533,7 +532,7 @@ bool WaterRenderer::EnsureShaders(IDirect3DDevice9* dev)
         for (const PixelShaderRequest& shader : pixels)
         {
             failedName = shader.name;
-            result = CreatePixelShaderWithIntegerConstants(dev, shader.code, shader.output);
+            result = dev->CreatePixelShader(reinterpret_cast<const DWORD*>(shader.code), shader.output);
             if (FAILED(result))
                 break;
         }
@@ -570,8 +569,7 @@ bool WaterRenderer::EnsureStateBlock(IDirect3DDevice9* dev)
     }
     float zeros[kWaterPixelConstants * 4] = {};
     dev->SetVertexShader(nullptr);
-    SetPixelShaderWithIntegerConstants(dev, nullptr);
-    ClearPixelShaderIntegerConstants(dev);
+    dev->SetPixelShader(nullptr);
     dev->SetPixelShaderConstantF(0, zeros, kWaterPixelConstants);
     dev->SetVertexDeclaration(m_decl);
     dev->SetStreamSource(0, nullptr, 0, 0);
@@ -896,7 +894,7 @@ bool WaterRenderer::CopySceneColour(IDirect3DDevice9* dev, IDirect3DSurface9* ta
 void WaterRenderer::CopyLinearDepth(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* copy)
 {
     SetTarget(dev, copy);
-    SetPixelShaderWithIntegerConstants(dev, m_packedDepth ? m_packedDepthCopy : m_depthCopy);
+    dev->SetPixelShader(m_packedDepth ? m_packedDepthCopy : m_depthCopy);
     dev->SetPixelShaderConstantF(0, &m_common[0][0], kCommonConstants);
     BindPointSampler(dev, 0, depthTexture, D3DTADDRESS_CLAMP);
     DrawFullscreenTriangle(dev);
@@ -1366,7 +1364,7 @@ void WaterRenderer::ShadeClasses(IDirect3DDevice9* dev, IDirect3DSurface9* targe
     m_shadingVariant = g_forcedShadingVariant >= 0 && g_forcedShadingVariant < kWaterQualityLevels
                            ? g_forcedShadingVariant
                            : ShadingVariant(m_cfg);
-    SetPixelShaderWithIntegerConstants(dev, m_shade[m_shadingVariant]);
+    dev->SetPixelShader(m_shade[m_shadingVariant]);
     dev->SetPixelShaderConstantF(0, &m_common[0][0], kCommonConstants);
     BindPointSampler(dev, kSceneColourStage, m_sceneColour, D3DTADDRESS_MIRROR);
     BindPointSampler(dev, kSceneDepthStage, m_sceneDepth, D3DTADDRESS_MIRROR);

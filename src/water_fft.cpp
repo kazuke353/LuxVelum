@@ -1,5 +1,4 @@
 #include "water_fft.h"
-#include "shader_integer_constants.h"
 
 #include "fullscreen_triangle.h"
 #include "log.h"
@@ -231,7 +230,7 @@ bool WaterFftPasses::EnsureShaders(IDirect3DDevice9* dev)
     HRESULT result = dev->CreateVertexShader(reinterpret_cast<const DWORD*>(g_vs_fullscreen), &m_vs);
     for (const PixelShaderRequest& request : requests)
         if (SUCCEEDED(result))
-            result = CreatePixelShaderWithIntegerConstants(dev, request.code,
+            result = dev->CreatePixelShader(reinterpret_cast<const DWORD*>(request.code),
                                             &m_shaders[static_cast<int>(request.shader)]);
     if (SUCCEEDED(result))
         result = dev->CreateVertexDeclaration(kElements, &m_decl);
@@ -365,7 +364,7 @@ void WaterFftPasses::UseShader(PassShader shader)
     IDirect3DPixelShader9* const pixelShader = m_shaders[static_cast<int>(shader)];
     if (pixelShader == m_boundShader)
         return;
-    SetPixelShaderWithIntegerConstants(m_passDevice, pixelShader);
+    m_passDevice->SetPixelShader(pixelShader);
     m_boundShader = pixelShader;
 }
 
