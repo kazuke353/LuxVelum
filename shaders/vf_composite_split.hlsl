@@ -1,4 +1,3 @@
-#define SPLIT_SAMPLES 1
 #include "vf_sample_split.hlsli"
 
 float4 cSampleSide : register(c99);

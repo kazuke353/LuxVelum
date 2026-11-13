@@ -6,6 +6,10 @@
 #define STEPS 24
 #endif
 
+#ifndef MARCH_PASS
+#define MARCH_PASS 0
+#endif
+
 #ifndef SUN_SHADOW
 #define SUN_SHADOW 1
 #endif
@@ -229,6 +233,11 @@ float SunShadowStrength()
     return cSunShadow.x;
 }
 
+bool ShowsSunVisibility()
+{
+    return cSunShadow.y > 0;
+}
+
 float StepSunVisibility(float sunVisibility, float stepMiddle, float marchLength)
 {
     float shadowEnd = SunShadowEnd(marchLength);
@@ -417,6 +426,10 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
             transmittance *= 1 - stepOpacity;
         }
     }
+#if MARCH_PASS && !LOCAL_LIGHTS && !SAMPLES_AUTHORED_NOISE
+    [branch] if (ShowsSunVisibility())
+        return float4(UnpackSunVisibility(jitterAndSun).xxx, 0);
+#endif
     return float4(clamp(inScatteredRadiance, 0, 65504), 1 - transmittance);
 }
 

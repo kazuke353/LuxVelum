@@ -63,6 +63,7 @@ constexpr DWORD kNearSamples = 1;
 constexpr DWORD kFarSamples = ~kUnmarkedSamples & kAllStencilBits;
 constexpr DWORD kStages = 11;
 constexpr UINT kLayerNoiseRegister = 36;
+constexpr int kSunShadowDebugView = 4;
 constexpr DWORD kAuthoredNoiseStage = 10;
 constexpr double kMaxNoiseStepSeconds = 0.25;
 constexpr UINT kRayScale = 4;
@@ -1389,7 +1390,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, const SceneDepth& depth, IDir
     SetTarget(dev, m_marchTarget);
     const Float4 celestialLight = {toLightInView[0], toLightInView[1], toLightInView[2], fog.lightAboveHorizon};
     const Float4 march = {cfg.temporal > 0.0f ? 1.0f : 0.0f, fog.maxDistance, fog.horizonStart, fog.farClip};
-    const Float4 sunShadow = {cfg.sunShadow, 0.0f, 0.0f, 0.0f};
+    const Float4 sunShadow = {cfg.sunShadow, cfg.debugView == kSunShadowDebugView ? 1.0f : 0.0f, 0.0f, 0.0f};
     dev->SetPixelShaderConstantF(9, &celestialLight.x, 1);
     dev->SetPixelShaderConstantF(10, &sunShadow.x, 1);
     dev->SetPixelShaderConstantF(11, &march.x, 1);
