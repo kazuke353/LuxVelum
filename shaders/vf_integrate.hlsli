@@ -199,7 +199,7 @@ float SunShadowEnd(float marchLength)
 float SunVisibility(float3 viewDirection, float marchLength, float jitter)
 {
     float lit = 0;
-    [loop] for (int i = 0; i < kSunShadowPoints; i++)
+    [unroll] for (int i = 0; i < kSunShadowPoints; i++)
     {
         float along = SunShadowEnd(marchLength) * (i + jitter) / kSunShadowPoints;
         float stride = kSunShadowFirstStep * (0.5 + frac(jitter + i * kGoldenRatioFraction));
