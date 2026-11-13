@@ -172,6 +172,7 @@ bool SunRayBlocked(float3 probe, float stride)
 {
     [loop] for (int k = 0; k < kSunShadowSteps; k++)
     {
+        float previousZ = probe.z;
         probe += DirectionToLightView() * stride;
         stride *= kSunShadowStepGrowth;
         [branch] if (probe.z < kSunShadowNearViewZ)
@@ -183,8 +184,8 @@ bool SunRayBlocked(float3 probe, float stride)
         [branch] if (IsSky(depth))
             continue;
         float sceneZ = LinearDepth(depth);
-        float thickness = max(kSunShadowMinThickness, probe.z * kSunShadowThicknessPerYard);
-        [branch] if (sceneZ < probe.z && sceneZ > probe.z - thickness)
+        float thickness = max(kSunShadowMinThickness, sceneZ * kSunShadowThicknessPerYard);
+        [branch] if (probe.z > sceneZ && previousZ < sceneZ + thickness)
             return true;
     }
     return false;
