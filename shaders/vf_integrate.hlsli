@@ -228,6 +228,47 @@ float UnpackSunVisibility(float jitterAndSun)
     return floor(jitterAndSun) / kSunVisibilityLevels;
 }
 
+float4 SunProbeOutcomes(float3 viewDirection, float marchLength)
+{
+    float4 outcomes = float4(0, 0, 0, 1);
+    [loop] for (int i = 0; i < kSunShadowPoints; i++)
+    {
+        float3 probe = viewDirection * (SunShadowEnd(marchLength) * (i + 0.5) / kSunShadowPoints);
+        float stride = kSunShadowFirstStep;
+        float outcome = 3;
+        [loop] for (int k = 0; k < kSunShadowSteps; k++)
+        {
+            float previousZ = probe.z;
+            probe += DirectionToLightView() * stride;
+            stride *= kSunShadowStepGrowth;
+            [branch] if (probe.z < kSunShadowNearViewZ)
+            {
+                outcome = 2;
+                break;
+            }
+            float2 pixel = ViewToPixel(probe);
+            [branch] if (OutsideViewport(pixel))
+            {
+                outcome = 1;
+                break;
+            }
+            float depth = SampleDepth(sDepth, pixel);
+            [branch] if (IsSky(depth))
+                continue;
+            float sceneZ = LinearDepth(depth);
+            float thickness = max(kSunShadowMinThickness, sceneZ * kSunShadowThicknessPerYard);
+            [branch] if (probe.z > sceneZ && previousZ < sceneZ + thickness)
+            {
+                outcome = 0;
+                break;
+            }
+        }
+        outcomes += float4(outcome == 0, outcome == 1, outcome == 2, 0) / kSunShadowPoints;
+    }
+    outcomes.a = cSunShadow.x;
+    return outcomes;
+}
+
 float SunShadowStrength()
 {
     return cSunShadow.x;
@@ -428,11 +469,7 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     }
 #if MARCH_PASS && !LOCAL_LIGHTS && !SAMPLES_AUTHORED_NOISE
     [branch] if (ShowsSunVisibility())
-    {
-        float2 firstProbe = ViewToPixel(viewDirection * (SunShadowEnd(marchLength) * jitter / kSunShadowPoints) +
-                                        DirectionToLightView() * 20);
-        return float4(UnpackSunVisibility(jitterAndSun), viewZ / 100, distance(firstProbe, pixel) / 400, 0);
-    }
+        return SunProbeOutcomes(viewDirection, marchLength);
 #endif
     return float4(clamp(inScatteredRadiance, 0, 65504), 1 - transmittance);
 }
