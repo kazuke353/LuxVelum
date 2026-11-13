@@ -2,7 +2,7 @@ name: Windows release build
 
 on:
   push:
-    branches: [main, st0ny-dev, st0ny-main]
+    branches: [main, st0ny-dev, st0ny-main, deus]
   pull_request:
     branches: [main]
   workflow_dispatch:
