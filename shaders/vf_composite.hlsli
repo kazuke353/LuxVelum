@@ -1,3 +1,6 @@
+#if SAMPLES_AUTHORED_NOISE
+#define SUN_SHADOW 0
+#endif
 #include "vf_integrate.hlsli"
 
 float4 cComposite : register(c96);

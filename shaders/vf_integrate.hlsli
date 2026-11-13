@@ -6,6 +6,10 @@
 #define STEPS 24
 #endif
 
+#ifndef SUN_SHADOW
+#define SUN_SHADOW 1
+#endif
+
 #ifndef LOCAL_LIGHTS
 #define LOCAL_LIGHTS 1
 #endif
@@ -24,6 +28,7 @@ static const float kSunShadowMinThickness = 15;
 static const float kSunShadowThicknessPerYard = 0.35;
 static const float kSunShadowNearViewZ = 0.5;
 static const float kSunVisibilityLevels = 255;
+static const bool kShadowsSunlight = SUN_SHADOW;
 
 
 float4 cLight : register(c9);
@@ -163,13 +168,12 @@ float2 ViewToPixel(float3 viewPosition)
     return NdcToPixel(viewPosition.xy / viewPosition.z * ViewToNdcScale() + ViewToNdcOffset());
 }
 
-bool SunRayBlocked(float3 viewPosition, float3 toLight, float jitter)
+bool SunRayBlocked(float3 probe, float stride)
 {
-    float travelled = kSunShadowFirstStep * (0.5 + jitter);
     [loop] for (int k = 0; k < kSunShadowSteps; k++)
     {
-        float3 probe = viewPosition + toLight * travelled;
-        travelled *= kSunShadowStepGrowth;
+        probe += DirectionToLightView() * stride;
+        stride *= kSunShadowStepGrowth;
         [branch] if (probe.z < kSunShadowNearViewZ)
             return false;
         float2 pixel = ViewToPixel(probe);
@@ -193,13 +197,12 @@ float SunShadowEnd(float marchLength)
 
 float SunVisibility(float3 viewDirection, float marchLength, float jitter)
 {
-    float shadowEnd = SunShadowEnd(marchLength);
-    float3 toLight = DirectionToLightView();
     float lit = 0;
     [loop] for (int i = 0; i < kSunShadowPoints; i++)
     {
-        float along = shadowEnd * (i + jitter) / kSunShadowPoints;
-        lit += SunRayBlocked(viewDirection * along, toLight, frac(jitter + i * kGoldenRatioFraction)) ? 0 : 1;
+        float along = SunShadowEnd(marchLength) * (i + jitter) / kSunShadowPoints;
+        float stride = kSunShadowFirstStep * (0.5 + frac(jitter + i * kGoldenRatioFraction));
+        lit += SunRayBlocked(viewDirection * along, stride) ? 0 : 1;
     }
     return lit / kSunShadowPoints;
 }
@@ -367,7 +370,8 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     MarchRay ray = {viewDirection, directionWorld, cameraWorld.z, riseLevelledAtHorizon};
     ChordCoverage lightCoverage = {0, false, 0, LocalLightCount()};
     float4 lightDensityScales = LayerLightDensityScales(skyMask, upward);
-    float jitterAndSun = PackJitterAndSunVisibility(jitter, SunVisibility(viewDirection, marchLength, jitter));
+    float sunVisibility = kShadowsSunlight ? SunVisibility(viewDirection, marchLength, jitter) : 1;
+    float jitterAndSun = PackJitterAndSunVisibility(jitter, sunVisibility);
 
     float layersEnd = LayersMarchEnd();
     float3 inScatteredRadiance = 0;
@@ -383,9 +387,11 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
         float stepEnd = marchLength * endFraction * endFraction;
         float3 stepRadiance = 0;
         float stepOpticalDepth = 0;
-        float stepJitter = UnpackJitter(jitterAndSun);
+        float stepJitter = kShadowsSunlight ? UnpackJitter(jitterAndSun) : jitter;
         float4 noiseDensities = LayerNoiseDensities(StepSamplePosition(ray, stepStart, stepEnd, stepJitter));
-        float sunScale = StepSunVisibility(UnpackSunVisibility(jitterAndSun), 0.5 * (stepStart + stepEnd), marchLength);
+        float sunScale = kShadowsSunlight
+            ? StepSunVisibility(UnpackSunVisibility(jitterAndSun), 0.5 * (stepStart + stepEnd), marchLength)
+            : 1;
         AccumulateLayers(noiseDensities, cosToLight, sunScale, skyMask, upward, stepStart, stepEnd, stepJitter, ray,
                          stepRadiance, stepOpticalDepth);
         [branch] if (kMarchesLocalLights && lightCoverage.nextEndpoint <= stepStart)
