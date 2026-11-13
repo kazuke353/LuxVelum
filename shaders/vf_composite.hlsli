@@ -342,7 +342,7 @@ float4 CompositeAtDepth(float2 pixel, float depth)
             return float4(1 - fog.aaa, 1);
         if (DebugViewAtMost(kDebugLinearDepth))
             return float4(saturate(viewZ / MaxFogDistance()).xxx, 1);
-        return float4(fog.rrr / Exposure(), 1);
+        return float4(fog.rgb / Exposure(), 1);
     }
     [branch] if (SunMarkerEnabled() && distance(pixel, SunPixel()) < kSunMarkerRadius)
         return kSunMarkerColour;

@@ -428,7 +428,11 @@ float4 IntegrateFogAtDepth(float2 pixel, float depth, float jitter)
     }
 #if MARCH_PASS && !LOCAL_LIGHTS && !SAMPLES_AUTHORED_NOISE
     [branch] if (ShowsSunVisibility())
-        return float4(UnpackSunVisibility(jitterAndSun).xxx, 0);
+    {
+        float2 firstProbe = ViewToPixel(viewDirection * (SunShadowEnd(marchLength) * jitter / kSunShadowPoints) +
+                                        DirectionToLightView() * 20);
+        return float4(UnpackSunVisibility(jitterAndSun), viewZ / 100, distance(firstProbe, pixel) / 400, 0);
+    }
 #endif
     return float4(clamp(inScatteredRadiance, 0, 65504), 1 - transmittance);
 }
