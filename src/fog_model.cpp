@@ -6,6 +6,8 @@
 
 namespace
 {
+constexpr float kHaloEdgeCos = 0.5f;
+constexpr float kMinHaloPhaseDenominator = 1.0e-6f;
 constexpr float kHazeDensity = 0.00035f;
 constexpr float kHazeG = 0.75f;
 constexpr float kHazeIsotropic = 0.3f;
@@ -32,6 +34,8 @@ constexpr float kFarSkyFalloff = 10.0f;
 constexpr float kFarExponent = 2.0f;
 
 constexpr float kClassicUnits = 0.01f;
+constexpr int kClassicHazeLayer = 0;
+constexpr int kClassicFarWallLayer = 1;
 constexpr float kFogRangeMargin = 300.0f;
 constexpr uint32_t kFlagShadowed = 0x1;
 constexpr uint32_t kFlagRelativeHeights = 0x2;
@@ -48,6 +52,13 @@ constexpr float kMinClassicDirectLuminance = 1.0e-3f;
 constexpr float kLuminanceWeights[3] = {0.2126f, 0.7152f, 0.0722f};
 constexpr float kReferenceFarTarget = 200.0f;
 constexpr float kNoLimit = 1.0e9f;
+constexpr int kExpansion01Map = 530;
+constexpr float kOutlandMinY = -2550.0f;
+constexpr float kMinClientFogLuminance = 1.0e-4f;
+constexpr float kMinRegionDensityForLocalLights = 0.05f;
+constexpr int kNorthrendMap = 571;
+constexpr float kClearSkyReferenceUpward = 0.005f;
+constexpr float kMaxClearSky = 0.9999f;
 
 float SmoothStep(float e0, float e1, float x)
 {
@@ -159,8 +170,32 @@ LayerNoise AuthoredLayerNoise(const AuthoredNoise& authored, const Config& cfg, 
     return noise;
 }
 
-void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& p, float sunScatter, FogLayer* out,
-                    LayerNoise* noise)
+float ClassicLayerSetting(int classicLayer, const Config& cfg)
+{
+    const Config defaults;
+    switch (classicLayer)
+    {
+    case kClassicHazeLayer:
+        return cfg.haze / defaults.haze;
+    case kClassicFarWallLayer:
+        return cfg.farFog / defaults.farFog;
+    default:
+        return cfg.groundFog / defaults.groundFog;
+    }
+}
+
+float ClearSkyFalloff(float clearSky)
+{
+    return clearSky > 0.0f ? -std::log(1.0f - std::min(clearSky, kMaxClearSky)) / kClearSkyReferenceUpward : 0.0f;
+}
+
+float SunlessNow(float sunless, float sunlessByDay, bool lightIsMoon)
+{
+    return std::min(sunless + (lightIsMoon ? 0.0f : sunlessByDay), 1.0f);
+}
+
+void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& p, float sunScatter, bool lightIsMoon,
+                    FogLayer* out, LayerNoise* noise)
 {
     for (int i = 0; i < kSceneLayers; ++i)
     {
@@ -175,12 +210,12 @@ void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& 
         l.densityVariation = 1.0f - noise[i].alpha;
         const float heightBase = a.flags & kFlagRelativeHeights ? p.referenceZ : 0.0f;
         l.start = std::clamp(a.start, 0.0f, std::max(p.maxDistance - kFogRangeMargin, 0.0f));
-        l.density = a.density * kClassicUnits * cfg.density;
+        l.density = a.density * kClassicUnits * cfg.density * ClassicLayerSetting(i, cfg);
         l.g = std::clamp(a.g, -0.99f, 0.99f);
         l.isotropic = 0.0f;
         Scale(a.emissive, cfg.ambient, l.emissive);
         l.strength = a.strength;
-        Scale(a.diffuse, 1.0f, l.diffuse);
+        Scale(a.diffuse, 1.0f - SunlessNow(a.sunless, a.sunlessByDay, lightIsMoon), l.diffuse);
         l.exponent = a.exponent > 0.0f ? a.exponent : 1.0f;
         l.upperHeight = a.upperHeight + heightBase;
         l.upperFalloff = a.upperDensity > 0.0f ? a.upperDensity * kClassicUnits : 0.0f;
@@ -189,6 +224,7 @@ void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& 
         Scale(a.shadowEmissive, cfg.ambient, l.shadowEmissive);
         l.shadowDensity = a.shadowMultiplier;
         l.shadowed = a.flags & kFlagShadowed ? 1.0f : 0.0f;
+        l.skyFalloff = ClearSkyFalloff(a.clearSky);
         Encode(l.emissive, p.linear);
         Encode(l.diffuse, p.linear);
         Encode(l.shadowEmissive, p.linear);
@@ -325,6 +361,70 @@ float ClientToClassicDirectLight(const AuthoredFog& fog, const float* clientDire
         return 1.0f;
     return std::clamp(Luminance(clientDirectLight) / classicLuminance, 0.0f, 1.0f);
 }
+
+float RegionSkyColorShare(const Config& cfg, MapRegion region)
+{
+    switch (region)
+    {
+    case MapRegion::Outland:
+        return cfg.outlandSkyColor;
+    case MapRegion::Northrend:
+        return cfg.northrendSkyColor;
+    case MapRegion::TBCStart:
+        return cfg.tbcStartSkyColor;
+    default:
+        return cfg.azerothSkyColor;
+    }
+}
+
+void MixTowardHue(float* rgb, const float* hue, float hueLuminance, float share)
+{
+    const float brightness = Luminance(rgb) / hueLuminance;
+    for (int c = 0; c < 3; ++c)
+        rgb[c] += (hue[c] * brightness - rgb[c]) * share;
+}
+
+void TakeClientFogHue(const float* clientFog, float share, FogLayer* layers)
+{
+    const float hueLuminance = Luminance(clientFog);
+    if (!(hueLuminance > kMinClientFogLuminance))
+        return;
+    for (int i = 0; i < kSceneLayers; ++i)
+    {
+        MixTowardHue(layers[i].emissive, clientFog, hueLuminance, share);
+        MixTowardHue(layers[i].shadowEmissive, clientFog, hueLuminance, share);
+    }
+}
+
+float RegionLocalLights(const Config& cfg, MapRegion region)
+{
+    switch (region)
+    {
+    case MapRegion::Outland:
+        return cfg.outlandLocalLights;
+    case MapRegion::Northrend:
+        return cfg.northrendLocalLights;
+    case MapRegion::TBCStart:
+        return cfg.tbcStartLocalLights;
+    default:
+        return cfg.azerothLocalLights;
+    }
+}
+
+float RegionDensity(const Config& cfg, MapRegion region)
+{
+    switch (region)
+    {
+    case MapRegion::Outland:
+        return cfg.outlandDensity;
+    case MapRegion::Northrend:
+        return cfg.northrendDensity;
+    case MapRegion::TBCStart:
+        return cfg.tbcStartDensity;
+    default:
+        return cfg.azerothDensity;
+    }
+}
 }
 
 void UnpackColor(uint32_t argb, float* rgb)
@@ -347,29 +447,40 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
     Encode(fogColor, p.linear);
     Encode(p.lightColor, p.linear);
 
+    const float sunAndMoon =
+        authored ? 1.0f - SunlessNow(authored->sunless, authored->sunlessByDay, in.lightIsMoon) : 1.0f;
     float elevation = SmoothStep(-0.03f, 0.10f, in.toLight[2]);
-    p.lightVisibility = elevation * (in.lightIsMoon ? kMoonLightScale : 1.0f);
+    p.lightVisibility = elevation * (in.lightIsMoon ? kMoonLightScale : 1.0f) * sunAndMoon;
     p.lightAboveHorizon = SmoothStep(-kLightSettingHalfWidth, kLightSettingHalfWidth, in.toLight[2]);
+    p.haloShadow = std::clamp(in.celestialShadow.hidden, 0.0f, 1.0f) * p.lightAboveHorizon;
+    p.haloOccluderDistance = in.celestialShadow.occluderDistance;
     p.farClip = in.farClip;
     p.maxDistance = std::max(cfg.maxDistance, in.farClip);
     p.horizonStart = in.farClip * 0.85f;
     p.referenceZ = ReferenceZ(in);
     p.farLimit = std::clamp(in.fogEnd, 100.0f, in.farClip);
+    const MapRegion region = RegionOf(CameraPlace(in));
+    p.localLightGain =
+        RegionLocalLights(cfg, region) / std::max(RegionDensity(cfg, region), kMinRegionDensityForLocalLights);
 
     float fogDistance = in.zoneFogDistance > 50.0f && in.zoneFogDistance < 20000.0f ? in.zoneFogDistance : in.fogEnd;
     fogDistance = std::clamp(fogDistance, 50.0f, 5000.0f);
-    float elevationFadedScatter = p.lightVisibility * cfg.sunScatter;
+    const float scatter = in.lightIsMoon ? cfg.moonScatter * in.zoneHalo.moon : cfg.sunScatter * in.zoneHalo.sun;
+    float elevationFadedScatter = elevation * scatter * sunAndMoon;
 
     FogLayer& distanceFog = p.layers[kDistanceFogLayer];
     p.directLightMatch = 1.0f;
     if (p.authored)
     {
         p.directLightMatch = ClientToClassicDirectLight(*authored, p.lightColor, p.linear);
-        AuthoredLayers(*authored, cfg, p, cfg.sunScatter * p.directLightMatch, p.layers, p.noise);
+        AuthoredLayers(*authored, cfg, p, scatter * p.directLightMatch, in.lightIsMoon, p.layers, p.noise);
+        const float skyShare = std::clamp(RegionSkyColorShare(cfg, region), 0.0f, 1.0f);
+        if (skyShare > 0.0f)
+            TakeClientFogHue(fogColor, skyShare, p.layers);
         HaloHue(*authored, p.rayColor);
         DistanceLayer(in, cfg, p, elevationFadedScatter, fogColor, distanceFog);
         const float thinness = ClassicFogThinness(p, *authored, in.camPos[2]);
-        distanceFog.density *= thinness + (1.0f - thinness) * interiorWeight;
+        distanceFog.density *= (thinness + (1.0f - thinness) * interiorWeight) * (1.0f - authored->clearSky);
     }
     else
     {
@@ -380,15 +491,90 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
     return p;
 }
 
+MapPlace PlaceOf(int mapId, const float* position)
+{
+    return {mapId, position[1]};
+}
+
+MapPlace CameraPlace(const FrameInputs& in)
+{
+    return PlaceOf(in.mapId, in.camPos);
+}
+
+MapRegion RegionOf(const MapPlace& place)
+{
+    if (place.mapId == kExpansion01Map)
+        return place.y < kOutlandMinY ? MapRegion::TBCStart : MapRegion::Outland;
+    if (place.mapId == kNorthrendMap)
+        return MapRegion::Northrend;
+    return MapRegion::Azeroth;
+}
+
+const char* RegionName(MapRegion region)
+{
+    switch (region)
+    {
+    case MapRegion::Outland:
+        return "Outland";
+    case MapRegion::Northrend:
+        return "Northrend";
+    case MapRegion::TBCStart:
+        return "TBCStart";
+    default:
+        return "Azeroth";
+    }
+}
+
+bool UsesFogData(const Config& cfg, const MapPlace& place)
+{
+    switch (RegionOf(place))
+    {
+    case MapRegion::Outland:
+        return cfg.outlandClassicFog != 0;
+    case MapRegion::Northrend:
+        return cfg.northrendClassicFog != 0;
+    default:
+        return true;
+    }
+}
+
+Config ConfigForPlace(const Config& cfg, const MapPlace& place)
+{
+    Config regional = cfg;
+    regional.density = cfg.density * RegionDensity(cfg, RegionOf(place));
+    if (!UsesFogData(cfg, place))
+        regional.dataMode = 0;
+    return regional;
+}
+
+Config ConfigForFrame(const Config& cfg, const FrameInputs& in)
+{
+    Config local = ConfigForPlace(cfg, CameraPlace(in));
+    local.density *= in.zoneHalo.density;
+    return local;
+}
+
 float EnergyNormalisedPhaseScale(float g)
 {
     const float capped = std::min(g, kMaxEnergyNormalisedPhaseG);
     return (1.0f + capped) / (kFourPi * (1.0f - capped) * (1.0f - capped));
 }
 
-PointLightUpload LocalLightUpload(const Config& cfg)
+float HaloEdgePhase(float g)
 {
-    return {ScattersInLinearLight(cfg), cfg.localLightIntensity};
+    const float denominator = std::max(1.0f + g * g - 2.0f * g * kHaloEdgeCos, kMinHaloPhaseDenominator);
+    const float r = (1.0f - g) / std::sqrt(denominator);
+    return r * r * r;
+}
+
+float PhaseUnderHaloShadow(float forwardPhase, float g, float haloShadow)
+{
+    return forwardPhase - haloShadow * std::max(forwardPhase - HaloEdgePhase(g), 0.0f);
+}
+
+PointLightUpload LocalLightUpload(const Config& cfg, const MapPlace& place)
+{
+    return {ScattersInLinearLight(cfg), cfg.localLightIntensity, RegionLocalLights(cfg, RegionOf(place))};
 }
 
 bool AnyLayerNoise(const FogParams& fog)

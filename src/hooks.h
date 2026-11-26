@@ -11,6 +11,14 @@ namespace engine
 struct StockFog;
 }
 
+enum class GetProcAddressSlotHolds : int
+{
+    LoaderThunk,
+    ResolvedGetProcAddress,
+    ForeignCode,
+};
+
+GetProcAddressSlotHolds ClassifyGetProcAddressSlot(uintptr_t value);
 bool InstallEngineHooks();
 void EnableForeverLookOnHookedClient();
 bool InstallTransparentFogHooks();
@@ -41,7 +49,7 @@ extern "C" void __cdecl vf_on_opaque_done();
 extern "C" void __cdecl vf_on_liquid_end();
 extern "C" void __cdecl vf_on_transparents_begin();
 extern "C" void __cdecl vf_on_world_done();
-extern "C" void __cdecl vf_on_m2_batch_fog(M2BatchFogArgs* args);
+extern "C" void __cdecl vf_on_m2_batch_fog(const void* batch, M2BatchFogArgs* args);
 extern "C" void __cdecl vf_on_water_pass_begin(const void* liquidRenderer);
 extern "C" void __cdecl vf_on_water_pass_end();
 
@@ -55,6 +63,7 @@ void LogTransparentFogStatsAtFrameEnd();
 void ClearTransparentFogFailure();
 const void* RetargetM2BatchFogThunk(uintptr_t target);
 const void* RetargetGlarePassThunk(uintptr_t target);
+const void* RetargetM2UnfoggedBatchThunk(uintptr_t target);
 const void* RetargetWorldTextDrawThunk(uintptr_t target);
 void UseTestWaterClient(const FrameInputs& in, const WaterInputs& water);
 unsigned TestWaterContactReads();

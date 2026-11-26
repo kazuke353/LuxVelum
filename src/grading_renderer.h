@@ -12,6 +12,9 @@ struct GradingStats
     bool holdsCurve = false;
 };
 
+void FailGradingSceneCopies(int count);
+void InjectGradingFault(bool injected);
+
 class GradingRenderer
 {
 public:
@@ -32,6 +35,10 @@ private:
     {
         IDirect3DSurface9* colour[kRenderTargets] = {};
         IDirect3DSurface9* depth = nullptr;
+        IDirect3DVertexBuffer9* stream = nullptr;
+        UINT streamOffset = 0;
+        UINT streamStride = 0;
+        bool captured = false;
     };
 
     bool Skip(const char* reason);
@@ -42,8 +49,10 @@ private:
     bool EnsureSceneCopy(IDirect3DDevice9* dev, D3DFORMAT format, UINT width, UINT height);
     bool CopyWorld(IDirect3DDevice9* dev, IDirect3DSurface9* target, const D3DSURFACE_DESC& desc,
                    const D3DVIEWPORT9& world);
-    bool GradeTarget(IDirect3DDevice9* dev, const BoundTargets& bound, const D3DVIEWPORT9& world, float strength);
-    void DrawGraded(IDirect3DDevice9* dev, const BoundTargets& bound, const D3DVIEWPORT9& world, float strength);
+    bool GradeTarget(IDirect3DDevice9* dev, BoundTargets& bound, const D3DVIEWPORT9& world, float strength);
+    void CaptureBoundState(IDirect3DDevice9* dev, BoundTargets& bound);
+    void RestoreBoundTargets(IDirect3DDevice9* dev, BoundTargets& bound);
+    void DrawGraded(IDirect3DDevice9* dev, BoundTargets& bound, const D3DVIEWPORT9& world, float strength);
     void SetGradingState(IDirect3DDevice9* dev, const D3DVIEWPORT9& world, float strength);
 
     IDirect3DVertexShader9* m_vs = nullptr;

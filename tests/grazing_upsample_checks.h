@@ -1,8 +1,6 @@
 #pragma once
 
-#include "ps_lit_composite_low.h"
-#include "ps_lit_composite_mid.h"
-#include "ps_lit_composite_high.h"
+#include "lit_composite_shaders.h"
 
 namespace grazing_upsample
 {
@@ -27,6 +25,17 @@ constexpr float kLightRadius = 20.0f;
 constexpr int kTransmittanceView = 2;
 constexpr int kFirstLayerNoiseFadeRegister = 38;
 
+enum class Composite
+{
+    Plain,
+    Lit,
+    LitNoisy,
+};
+
+constexpr Composite kComposites[] = {Composite::Plain, Composite::Lit, Composite::LitNoisy};
+constexpr int kCompositeFamilies = static_cast<int>(std::size(kComposites));
+constexpr int kQualities = 3;
+
 enum class Upsampled
 {
     CurrentMarch,
@@ -49,8 +58,7 @@ struct Fixture
     IDirect3DTexture9* filteredFog = nullptr;
     IDirect3DTexture9* currentMarch = nullptr;
     IDirect3DTexture9* lights = nullptr;
-    IDirect3DPixelShader9* shaders[3] = {};
-    IDirect3DPixelShader9* litShaders[3] = {};
+    IDirect3DPixelShader9* composites[kCompositeFamilies][kQualities] = {};
 
     explicit Fixture(IDirect3DDevice9* value) : device(value) {}
 
@@ -65,11 +73,19 @@ struct Fixture
             state->Apply();
         device->SetStreamSource(0, savedStream, savedOffset, savedStride);
         IUnknown* resources[] = {state, savedTarget, savedDepth, savedStream, target, readback, depth, filteredFog,
-                                 currentMarch, lights, shaders[0], shaders[1], shaders[2], litShaders[0],
-                                 litShaders[1], litShaders[2]};
+                                 currentMarch, lights};
         for (IUnknown* resource : resources)
             if (resource)
                 resource->Release();
+        for (auto& family : composites)
+            for (IDirect3DPixelShader9* shader : family)
+                if (shader)
+                    shader->Release();
+    }
+
+    IDirect3DPixelShader9* Shader(Composite composite, int quality) const
+    {
+        return composites[static_cast<int>(composite)][quality];
     }
 
     bool Create()
@@ -86,15 +102,31 @@ struct Fixture
             FAILED(device->CreateTexture(kLightTexels, 1, 1, 0, D3DFMT_A32B32G32R32F, D3DPOOL_MANAGED, &lights,
                                          nullptr)))
             return false;
-        const BYTE* bytecode[] = {g_ps_composite_low, g_ps_composite_mid, g_ps_composite_high};
-        const BYTE* litBytecode[] = {g_ps_lit_composite_low, g_ps_lit_composite_mid, g_ps_lit_composite_high};
-        for (int i = 0; i < 3; ++i)
-            if (FAILED(device->CreatePixelShader(reinterpret_cast<const DWORD*>(bytecode[i]), &shaders[i])) ||
-                FAILED(device->CreatePixelShader(reinterpret_cast<const DWORD*>(litBytecode[i]), &litShaders[i])))
-                return false;
+        const BYTE* const bytecode[kCompositeFamilies][kQualities] = {
+            {g_ps_composite_low, g_ps_composite_mid, g_ps_composite_high},
+            {g_ps_lit_composite_low, g_ps_lit_composite_mid, g_ps_lit_composite_high},
+            {g_ps_lit_noisy_composite_low, g_ps_lit_noisy_composite_mid, g_ps_lit_noisy_composite_high}};
+        for (int family = 0; family < kCompositeFamilies; ++family)
+            for (int quality = 0; quality < kQualities; ++quality)
+                if (FAILED(device->CreatePixelShader(reinterpret_cast<const DWORD*>(bytecode[family][quality]),
+                                                     &composites[family][quality])))
+                    return false;
         return true;
     }
 };
+
+bool CompositeTakesScene(Composite composite, int lightCount, bool layerNoise)
+{
+    switch (composite)
+    {
+    case Composite::Plain:
+        return lightCount == 0 && !layerNoise;
+    case Composite::Lit:
+        return !layerNoise;
+    default:
+        return layerNoise;
+    }
+}
 
 float InverseGroundViewZ(float pixelY)
 {
@@ -199,14 +231,14 @@ bool FillLight(Fixture& fixture, float viewZ)
 }
 
 bool ProbeTransmittance(Fixture& fixture, UINT scale, int quality, int lightCount, bool layerNoise,
-                        bool litShader, float& transmittance)
+                        Composite composite, float& transmittance)
 {
     IDirect3DDevice9* device = fixture.device;
     const D3DVIEWPORT9 viewport = {0, 0, kWidth, kHeight, 0, 1};
     device->SetDepthStencilSurface(nullptr);
     device->SetRenderTarget(0, fixture.target);
     device->SetViewport(&viewport);
-    device->SetPixelShader((litShader ? fixture.litShaders : fixture.shaders)[quality]);
+    device->SetPixelShader(fixture.Shader(composite, quality));
     device->SetVertexShader(nullptr);
     device->SetFVF(D3DFVF_XYZRHW);
     device->SetTexture(0, fixture.depth);
@@ -318,14 +350,14 @@ void CheckGrazingGroundUpsample(IDirect3DDevice9* device)
                                   [&scene](UINT row) { return RampOpacityLevel(row, scene.zigzag); }) &&
                 FillLight(fixture, scene.lightViewZ);
             float worst = 0.0f;
-            for (int quality = 0; quality < 3 && passed; ++quality)
-                for (bool litShader : {false, true})
+            for (int quality = 0; quality < kQualities && passed; ++quality)
+                for (Composite composite : kComposites)
                 {
-                    if (scene.lightCount > 0 && !litShader)
+                    if (!CompositeTakesScene(composite, scene.lightCount, scene.layerNoise))
                         continue;
                     float transmittance = 0.0f;
                     passed = passed && ProbeTransmittance(fixture, scale, quality, scene.lightCount,
-                                                          scene.layerNoise, litShader, transmittance);
+                                                          scene.layerNoise, composite, transmittance);
                     worst = std::fmax(worst, std::fabs(transmittance - expected));
                 }
             char label[192];

@@ -163,6 +163,63 @@ void CheckLocalLightInputs()
           "whether or not the point-light walk is requested (the walk skip itself needs the client image)");
 }
 
+LocalPointLight RegionLampFixture(float x, float z)
+{
+    LocalPointLight lamp;
+    lamp.position[0] = x;
+    lamp.position[2] = z;
+    lamp.color[0] = 1.0f;
+    lamp.color[1] = 0.49f;
+    lamp.color[2] = 0.15f;
+    lamp.attenuation[1] = 0.7f;
+    lamp.attenuation[2] = 0.1f;
+    return lamp;
+}
+
+void CheckLocalLightReachFollowsRegion()
+{
+    const Config defaults;
+    const PointLightUpload azeroth = LocalLightUpload(defaults, kInEasternKingdoms);
+    const PointLightUpload outland = LocalLightUpload(defaults, kInOutland);
+    const PointLightUpload northrend = LocalLightUpload(defaults, kInNorthrend);
+    const LocalPointLight lamp = RegionLampFixture(0.0f, 300.0f);
+    float uploaded[3];
+    engine::UploadedPointLightColor(lamp.color, northrend, uploaded);
+    float eightTimesBrighter[3];
+    for (int c = 0; c < 3; ++c)
+        eightTimesBrighter[c] = uploaded[c] * northrend.reach;
+    const float plain = engine::PointLightCutoff(uploaded, lamp.attenuation);
+    const float inAzeroth = engine::PointLightCutoff(uploaded, lamp.attenuation, azeroth.reach);
+    const float inNorthrend = engine::PointLightCutoff(uploaded, lamp.attenuation, northrend.reach);
+    const float brighter = engine::PointLightCutoff(eightTimesBrighter, lamp.attenuation);
+    std::printf("     lamp glow reach: Azeroth %.1f yd, Northrend %.1f yd (a lamp 8x brighter %.1f yd)\n", inAzeroth,
+                inNorthrend, brighter);
+    Check(azeroth.reach == 1.0f && outland.reach == 8.0f && northrend.reach == 8.0f && inAzeroth == plain &&
+              inNorthrend > 2.0f * plain && inNorthrend < kMaxLocalPointLightRadius && LocalNear(inNorthrend, brighter),
+          "a lamp's glow reaches as far as its region's local light intensity carries it: at Outland's and "
+          "Northrend's 8 as far as a lamp 8 times brighter, in Azeroth at 1 as before");
+
+    const LocalLightCamera ahead = ForwardViewCamera(1.0f, 2000.0f);
+    LocalLightInputs azerothView;
+    LocalLightInputs northrendView;
+    const bool aheadInAzeroth = engine::SelectLocalPointLightInView(azerothView, lamp, ahead, azeroth);
+    const bool aheadInNorthrend = engine::SelectLocalPointLightInView(northrendView, lamp, ahead, northrend);
+    const float besidePlane = 0.5f * (inAzeroth + inNorthrend);
+    const float besideX = lamp.position[2] + besidePlane * std::sqrt(2.0f);
+    const LocalPointLight beside = RegionLampFixture(besideX, lamp.position[2]);
+    const bool besideInAzeroth = engine::SelectLocalPointLightInView(azerothView, beside, ahead, azeroth);
+    const bool besideInNorthrend = engine::SelectLocalPointLightInView(northrendView, beside, ahead, northrend);
+    std::printf("     selected lamp bounds: Azeroth %.1f yd, Northrend %.1f yd; a lamp %.1f yd beside the view %s in "
+                "Azeroth, %s in Northrend\n",
+                azerothView.pointLights[0].cutoff, northrendView.pointLights[0].cutoff, besidePlane,
+                besideInAzeroth ? "selected" : "left out", besideInNorthrend ? "selected" : "left out");
+    Check(aheadInAzeroth && aheadInNorthrend && LocalNear(azerothView.pointLights[0].cutoff, inAzeroth) &&
+              LocalNear(northrendView.pointLights[0].cutoff, inNorthrend) && !besideInAzeroth && besideInNorthrend &&
+              azerothView.pointLightCount == 1 && northrendView.pointLightCount == 2,
+          "a lamp selected for the view carries its region's reach in its bounds, so beside the view a Northrend "
+          "lamp still reaches into it where the same lamp in Azeroth is left out");
+}
+
 struct TablePointLight
 {
     uintptr_t scene = 0;
@@ -384,7 +441,7 @@ void CheckPointLightTableCapture()
     Check(truncated == LocalLightCapture::TableTruncated &&
               truncatedWalk.capture == LocalLightCapture::TableTruncated &&
               truncatedWalk.pointLightCount == kMaxLocalPointLights &&
-              truncatedWalk.candidateCount == kLocalLightCandidatePool,
+              truncatedWalk.candidateCount == kLocalLightCapturePool,
           "a table beyond 8192 nodes is truncated, not rejected: the lights walked so far stay usable");
 
     void* unmapped = VirtualAlloc(nullptr, 65536, MEM_RESERVE, PAGE_NOACCESS);

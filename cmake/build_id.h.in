@@ -1,0 +1,4 @@
+#pragma once
+
+constexpr const char* kLuxvelumVersion = "@LUXVELUM_VERSION@";
+constexpr const char* kLuxvelumBuildId = "@LUXVELUM_BUILD_ID@";

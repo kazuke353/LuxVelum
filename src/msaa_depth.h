@@ -22,6 +22,9 @@ struct DepthCopyProbe
 DepthCopyProbe ProbeDepthCopy(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type);
 void ForceDepthCopyMethod(int method);
 
+using LibraryLoader = HMODULE(WINAPI*)(LPCWSTR file, HANDLE reserved, DWORD flags);
+const char* LoadNvapiThrough(LibraryLoader load);
+
 class DepthCopyProbes
 {
 public:

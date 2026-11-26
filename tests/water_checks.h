@@ -50,6 +50,8 @@ constexpr uint32_t kOtherSunColour = 0xFF4060FF;
 constexpr uint32_t kSunsetDirectColour = 0xFFFF7400;
 constexpr uint32_t kSunsetSpriteColour = 0xFFFFE7B6;
 constexpr float kSunsetElevation = 0.05f;
+constexpr float kHiddenGlintRidgeDistance = 5000.0f;
+constexpr float kHiddenGlintTrunkDistance = 0.5f;
 constexpr float kLitGroundTolerance = 2.0f / 255.0f;
 constexpr Vec3 kGrazingEye = {0, 0, 4};
 constexpr Vec3 kGrazingTarget = {100, 5, 1};
@@ -58,6 +60,21 @@ constexpr UINT kMirroredShoreRows = 8;
 constexpr int kShoreColourTolerance = 3;
 constexpr float kMaxShoreReflectionFraction = 0.02f;
 constexpr float kRoughTileAmplitude = 30000.0f;
+constexpr float kFullReflectionWaviness = 1.0f;
+constexpr float kMaxCalmReflectionGrainRatio = 0.75f;
+constexpr uint32_t kSyntheticSkyColour = 0xFF00FF00;
+constexpr int kSyntheticSkyTolerance = 8;
+constexpr float kReflectionEdgeFadeWidth = 0.15f;
+constexpr float kMinSkyOnlySyntheticFraction = 0.9f;
+constexpr float kMaxScreenSyntheticFraction = 0.05f;
+constexpr int kSkyOnlyWaterQuality = 1;
+constexpr int kScreenReflectionWaterQuality = 2;
+constexpr DWORD kNearPoleColour = 0xFFD020A0;
+constexpr Vec3 kNearPoleMin = {45, -1, kBasinFloorZ};
+constexpr Vec3 kNearPoleMax = {47, 1, 20};
+constexpr float kWaterBeyondPoleX = 60.0f;
+constexpr int kNearPoleTolerance = 12;
+constexpr float kMaxNearPoleReflectionFraction = 0.002f;
 constexpr float kRoughTileWindMultiplier = 3.0f;
 constexpr float kFoamEverywhereRange = 10000.0f;
 constexpr float kDimFoamTint = 0.25f;
@@ -2078,6 +2095,34 @@ void CheckWaterFollowsTheDirectLight(Harness& h, const Config& base)
           "water is lit by the client's direct light (band 0), not by the sun sprite colour (band 9)");
 }
 
+void CheckHiddenLightDropsTheGlint(Harness& h, const Config& base)
+{
+    const Config on = WaterConfig(base);
+    Config withoutGlint = on;
+    withoutGlint.waterSpecular = 0.0f;
+    WaterView view = DefaultWaterView();
+    WaterView behindRidge = view;
+    behindRidge.in.celestialShadow = {1.0f, kHiddenGlintRidgeDistance};
+    WaterView behindTrunk = view;
+    behindTrunk.in.celestialShadow = {1.0f, kHiddenGlintTrunkDistance};
+    WaterFrame lake;
+    BasinClient open(h, view);
+    BasinClient ridge(h, behindRidge);
+    BasinClient trunk(h, behindTrunk);
+    vf_test_set_config(&on);
+    const WaterFrameResult glinting = open.Render(lake);
+    const WaterFrameResult ridgeHidden = ridge.Render(lake);
+    const WaterFrameResult trunkHidden = trunk.Render(lake);
+    vf_test_set_config(&withoutGlint);
+    const WaterFrameResult noGlint = open.Render(lake);
+    vf_test_set_config(&on);
+    Check(glinting.began && ridgeHidden.began && trunkHidden.began && noGlint.began &&
+              SameImage(ridgeHidden.image, noGlint.image) && SameImage(trunkHidden.image, glinting.image) &&
+              !SameImage(glinting.image, noGlint.image),
+          "the glint leaves the water in front of the ridge that hides the sun and stays on water beyond the "
+          "farthest occluder");
+}
+
 bool MatchesColour(const unsigned char* bgr, DWORD colour)
 {
     const int expected[3] = {static_cast<int>(colour & 0xFF), static_cast<int>((colour >> 8) & 0xFF),
@@ -2131,6 +2176,178 @@ void CheckGrazingReflectionsMissTheShore(Harness& h, const Config& base, const s
     const Config on = WaterConfig(base);
     vf_test_set_config(&on);
     AssignWaterData(MakeSyntheticWaterData());
+}
+
+double ReflectionGrain(const Image& mask, const Image& reflected)
+{
+    double difference = 0.0;
+    size_t pairs = 0;
+    for (UINT y = 0; y < mask.h; ++y)
+        for (UINT x = 1; x < mask.w; ++x)
+        {
+            if (!IsMaskPixel(mask, x - 1, y) || !IsMaskPixel(mask, x, y))
+                continue;
+            const unsigned char* left = reflected.At(x - 1, y);
+            const unsigned char* right = reflected.At(x, y);
+            for (int channel = 0; channel < 3; ++channel)
+                difference += std::abs(left[channel] - right[channel]);
+            ++pairs;
+        }
+    return pairs ? difference / static_cast<double>(pairs) : 0.0;
+}
+
+void CheckCalmReflectionsAreLessGrainy(Harness& h, const Config& base, const std::wstring& outDir)
+{
+    SyntheticWaterData rough = MakeSyntheticWaterData();
+    for (WaterFftTile& tile : rough.tiles)
+    {
+        tile.amplitude = kRoughTileAmplitude;
+        tile.windMultiplier = kRoughTileWindMultiplier;
+    }
+    const bool assigned = AssignWaterData(rough);
+    BasinClient client(h, DefaultWaterView());
+    Config reflection = WaterConfig(base);
+    reflection.waterDebugView = kReflectionDebugView;
+    reflection.density = 0.0f;
+    vf_test_set_config(&reflection);
+    WaterFrame mask;
+    mask.calls = WaterCalls::None;
+    mask.opaqueMask = true;
+    const WaterFrameResult water = client.Render(mask);
+    WaterFrame pass;
+    const float wavinesses[] = {kFullReflectionWaviness, Config().waterReflectionWaviness, 0.0f};
+    double grain[3] = {};
+    bool began = true;
+    for (int i = 0; i < 3; ++i)
+    {
+        reflection.waterReflectionWaviness = wavinesses[i];
+        vf_test_set_config(&reflection);
+        const WaterFrameResult reflected = client.Render(pass);
+        began = began && reflected.began;
+        grain[i] = ReflectionGrain(water.image, reflected.image);
+        if (i == 1)
+            SaveImage(outDir, L"water-calm-reflection", reflected.image);
+    }
+    std::printf("     reflection grain between neighbouring water pixels: %.1f at waviness %.2f, %.1f at %.2f, "
+                "%.1f at %.2f\n",
+                grain[0], wavinesses[0], grain[1], wavinesses[1], grain[2], wavinesses[2]);
+    Check(assigned && began && grain[0] > 0.0 && grain[1] <= grain[0] * kMaxCalmReflectionGrainRatio &&
+              grain[2] <= grain[1],
+          "with WaterReflectionWaviness below 1, rough waves bend the reflection rays less and the reflections "
+          "change less from one water pixel to the next");
+    const Config on = WaterConfig(base);
+    vf_test_set_config(&on);
+    AssignWaterData(MakeSyntheticWaterData());
+}
+
+bool MirroredRayEndsInsideTheScreen(const WaterView& v, UINT x, UINT y)
+{
+    const Vec3 down = PixelRay(v, x + 0.5f, y + 0.5f);
+    const Vec3 up = {down.x, down.y, -down.z};
+    const float* m = v.view;
+    const float viewX = up.x * m[0] + up.y * m[4] + up.z * m[8];
+    const float viewY = up.x * m[1] + up.y * m[5] + up.z * m[9];
+    const float viewZ = up.x * m[2] + up.y * m[6] + up.z * m[10];
+    if (viewZ <= 0.0f)
+        return false;
+    const float u = 0.5f * (viewX / viewZ * v.proj[0] + v.proj[8] + 1.0f);
+    const float w = 0.5f * (1.0f - (viewY / viewZ * v.proj[5] + v.proj[9]));
+    return u > kReflectionEdgeFadeWidth && u < 1.0f - kReflectionEdgeFadeWidth && w > kReflectionEdgeFadeWidth &&
+           w < 1.0f - kReflectionEdgeFadeWidth;
+}
+
+float SyntheticSkyFraction(const WaterView& v, const Image& mask, const Image& reflected)
+{
+    size_t water = 0;
+    size_t synthetic = 0;
+    for (UINT y = 0; y < mask.h; ++y)
+        for (UINT x = 0; x < mask.w; ++x)
+        {
+            if (!IsMaskPixel(mask, x, y) || !MirroredRayEndsInsideTheScreen(v, x, y))
+                continue;
+            ++water;
+            synthetic += NearColour(reflected.At(x, y), kSyntheticSkyColour, kSyntheticSkyTolerance) ? 1 : 0;
+        }
+    return water ? static_cast<float>(synthetic) / static_cast<float>(water) : 1.0f;
+}
+
+void CheckScreenReflectionsReplaceTheSyntheticSky(Harness& h, const Config& base)
+{
+    WaterView view = DefaultWaterView();
+    for (uint32_t& sky : view.water.skyColors)
+        sky = kSyntheticSkyColour;
+    BasinClient client(h, view);
+    Config reflection = WaterConfig(base);
+    reflection.waterDebugView = kReflectionDebugView;
+    reflection.density = 0.0f;
+    reflection.waterWaves = 0.0f;
+    vf_test_set_config(&reflection);
+    WaterFrame mask;
+    mask.calls = WaterCalls::None;
+    mask.opaqueMask = true;
+    const WaterFrameResult water = client.Render(mask);
+    WaterFrame pass;
+    reflection.waterQuality = kSkyOnlyWaterQuality;
+    vf_test_set_config(&reflection);
+    const WaterFrameResult skyOnly = client.Render(pass);
+    reflection.waterQuality = kScreenReflectionWaterQuality;
+    vf_test_set_config(&reflection);
+    const WaterFrameResult screen = client.Render(pass);
+    const float skyOnlyFraction = SyntheticSkyFraction(view, water.image, skyOnly.image);
+    const float screenFraction = SyntheticSkyFraction(view, water.image, screen.image);
+    std::printf("     flat water whose mirrored ray ends inside the screen, reflecting the synthetic sky: %.1f%% with "
+                "sky reflections only, %.1f%% with screen reflections\n",
+                skyOnlyFraction * 100.0f, screenFraction * 100.0f);
+    Check(skyOnly.began && screen.began && skyOnlyFraction >= kMinSkyOnlySyntheticFraction &&
+              screenFraction <= kMaxScreenSyntheticFraction,
+          "screen reflections whose ray stays inside the screen reflect the scene's own colours or the real sky, not "
+          "the synthetic sky");
+    const Config on = WaterConfig(base);
+    vf_test_set_config(&on);
+}
+
+void CheckObjectsNearerThanTheWaterAreNotReflected(Harness& h, const Config& base)
+{
+    WaterView view = DefaultWaterView();
+    BasinClient client(h, view);
+    std::vector<SceneVertex> scene = BuildBasinScene();
+    AddBox(scene, kNearPoleMin, kNearPoleMax, kNearPoleColour);
+    client.UseScene(scene);
+    Config reflection = WaterConfig(base);
+    reflection.waterDebugView = kReflectionDebugView;
+    reflection.density = 0.0f;
+    reflection.waterQuality = kScreenReflectionWaterQuality;
+    reflection.waterReflectionWaviness = kFullReflectionWaviness;
+    vf_test_set_config(&reflection);
+    WaterFrame mask;
+    mask.calls = WaterCalls::None;
+    mask.opaqueMask = true;
+    const WaterFrameResult water = client.Render(mask);
+    WaterFrame pass;
+    const WaterFrameResult reflected = client.Render(pass);
+    size_t considered = 0;
+    size_t pole = 0;
+    for (UINT y = 0; y < water.image.h; ++y)
+        for (UINT x = 0; x < water.image.w; ++x)
+        {
+            if (!IsMaskPixel(water.image, x, y))
+                continue;
+            const Vec3 ray = PixelRay(view, x + 0.5f, y + 0.5f);
+            const float depth = ViewDepthOfPlane(view, ray, kWaterSurfaceZ);
+            const float worldX = view.eye.x - kGameLikeWorldOffset.x + ray.x * depth;
+            if (depth <= 0.0f || worldX < kWaterBeyondPoleX)
+                continue;
+            ++considered;
+            pole += NearColour(reflected.image.At(x, y), kNearPoleColour, kNearPoleTolerance) ? 1 : 0;
+        }
+    const float fraction = considered ? static_cast<float>(pole) / static_cast<float>(considered) : 1.0f;
+    std::printf("     %zu of %zu water pixels beyond a pole nearer to the camera reflect the pole (%.2f%%)\n", pole,
+                considered, fraction * 100.0f);
+    Check(water.began && reflected.began && considered > 0 && fraction <= kMaxNearPoleReflectionFraction,
+          "water farther from the camera than an object does not reflect that object, as the player's own character "
+          "and staff did in the water behind them");
+    const Config on = WaterConfig(base);
+    vf_test_set_config(&on);
 }
 
 SyntheticWaterData FoamCoveredLake(float tint)
@@ -2460,7 +2677,11 @@ void CheckWaterPass(Harness& h, const std::wstring& outDir, const std::string& w
     CheckStockFoggedCopyIsFoggedOnce(h, base);
     CheckInteriorIgnoresSun(h, base);
     CheckWaterFollowsTheDirectLight(h, base);
+    CheckHiddenLightDropsTheGlint(h, base);
     CheckGrazingReflectionsMissTheShore(h, base, outDir);
+    CheckCalmReflectionsAreLessGrainy(h, base, outDir);
+    CheckScreenReflectionsReplaceTheSyntheticSky(h, base);
+    CheckObjectsNearerThanTheWaterAreNotReflected(h, base);
     CheckFoamTintsAreLinear(client, base);
     CheckSunsetFoamStaysBelowLitGround(h, base);
     CheckEndReportsWhatItShaded(h, client, base);

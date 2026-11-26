@@ -29,6 +29,7 @@ float4 cReflectionFogRange : register(c64);
 float4 cRippleWindow : register(c65);
 float4 cRippleShape : register(c66);
 float4 cRippleFade : register(c67);
+float4 cGlintShadow : register(c68);
 
 sampler2D sSceneColour : register(s0);
 sampler2D sSceneDepth : register(s1);
@@ -157,9 +158,19 @@ float SpecularStrength()
     return cSurfaceResponse.w;
 }
 
+float GlintShadowAt(float cameraDistance)
+{
+    return cameraDistance < cGlintShadow.y ? cGlintShadow.x : 0;
+}
+
 float InverseTileCount()
 {
     return cWaveControl.x;
+}
+
+float ReflectionWaviness()
+{
+    return cWaveControl.y;
 }
 
 float WaterClassIndex()

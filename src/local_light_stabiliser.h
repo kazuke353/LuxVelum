@@ -10,6 +10,7 @@ constexpr double kLocalLightSwapMargin = 1.5;
 constexpr uint32_t kLocalLightSwapCaptures = 3;
 constexpr uint32_t kLocalLightHoldCaptures = 8;
 constexpr float kLocalLightIdentityYards = 2.0f;
+constexpr float kLocalLightIdentitySpeed = 40.0f;
 constexpr float kLocalLightViewExitYards = 5.0f;
 constexpr double kLocalLightResetSeconds = 1.0;
 constexpr double kLocalLightActivityLogSeconds = 60.0;
@@ -38,6 +39,7 @@ private:
         double smoothedPriority = 0.0;
         float weight = 0.0f;
         uint32_t challengeCaptures = 0;
+        uint32_t absentCaptures = 0;
         bool slotted = false;
         bool evicted = false;
         bool heirToEvictedSlot = false;
@@ -48,12 +50,16 @@ private:
 
     void Replay(LocalLightInputs& lights) const;
     bool HoldOutput(LocalLightInputs& lights);
+    float AdvanceMatchClock(double seconds);
     void MatchCandidates(const LocalLightCamera& camera, const LocalLightInputs& lights, float dt);
-    Entry* FindEntry(const LocalPointLight& light);
+    Entry* FindEntry(const LocalPointLight& light, float dt);
     Entry* AddEntry(const LocalPointLight& light, double priority);
     void AdvanceWeights(float dt);
     static bool TakesFreeSlotBefore(const Entry& entry, const Entry& other);
     void FillFreeSlots();
+    uint32_t AdoptOrphanedEvictions(const Entry& weakestEvicted, uint32_t orphans);
+    void CancelEvictionsWithoutHeirs();
+    void CallOffLeastFadedEvictions(uint32_t count);
     void ChallengeWeakestSlot();
     void RemoveSpentEntries();
     void WriteOutput(LocalLightInputs& lights);
@@ -64,10 +70,13 @@ private:
     LocalPointLight m_held[kMaxLocalPointLights] = {};
     uint32_t m_heldCount = 0;
     uint32_t m_rejectedCaptures = 0;
+    uint32_t m_orphanCaptures = 0;
     bool m_sceneStarting = true;
     int m_mapId = 0;
     uint32_t m_lastFrame = 0;
     double m_lastSeconds = 0.0;
+    double m_lastMatchSeconds = 0.0;
+    bool m_matched = false;
     double m_lastLogSeconds = 0.0;
     bool m_started = false;
     LocalLightActivity m_activity;

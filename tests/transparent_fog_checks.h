@@ -55,7 +55,7 @@ constexpr int kWarmUpFrames = 2;
 constexpr int kMaxEarlyDifference = 1;
 constexpr int kMaxMultisampledEarlyDifference = 2;
 constexpr float kRaySunRegion = 60.0f;
-constexpr float kMinRayGain = 0.01f;
+constexpr int kMinShaftLevels = 8;
 constexpr int kMaxRayDarkening = 1;
 constexpr int kMaxLateRayDifference = 2;
 constexpr int kLoggedFailingFrames = 4;
@@ -64,6 +64,10 @@ constexpr uintptr_t kUnreadableAddress = 0x10;
 constexpr const char* kEarlyCompositeDepthUnboundLine =
     "transparent fog: the early composite was skipped: fog depth surface not bound; the fog is drawn after the world";
 constexpr float kRaysOn = 1.0f;
+constexpr const char* kFogPassFaultLine = "exception 0xE0564646 in world hook; fog disabled for this session";
+constexpr float kTemporalOn = 0.85f;
+constexpr const char* kLateRaysDepthUnboundLine = "god rays after the world skipped: fog depth surface not bound";
+constexpr const char* kRaySourceCopyFailedLine = "god rays skipped: the scene copy they are drawn from failed";
 constexpr uint32_t kSentinelEsi = 0x51515151u;
 constexpr uint32_t kSentinelEdi = 0x5D5D5D5Du;
 constexpr uint32_t kSentinelEbx = 0x5B5B5B5Bu;
@@ -81,6 +85,9 @@ constexpr float kFitRayCentreFalloff = 1.5f;
 constexpr float kCompositeHighlightKnee = 0.8f;
 constexpr int kMinLampLitColourLevel = 40;
 constexpr int kMaxLampColourLevelError = 3;
+constexpr float kFitLampCutoff = 30.0f;
+constexpr float kFitLampPhase = 0.3f;
+constexpr float kFitLocalLightGain = 2.0f;
 
 struct LampPlacement
 {
@@ -424,6 +431,56 @@ void CheckFitAgainstTheVolumetricFog(const FogData& classic)
     CheckFarDepartures(v, harbourFog, harbour);
 }
 
+FrameInputs LampsAroundTheCameraInputs()
+{
+    View v;
+    LocalLightInputs& lights = v.in.localLights;
+    for (const LampPlacement& placement : kLampsAroundTheCamera)
+    {
+        LocalPointLight& lamp = lights.pointLights[lights.pointLightCount++];
+        const Vec3 position = Add(v.eye, placement.fromEye);
+        lamp.position[0] = position.x;
+        lamp.position[1] = position.y;
+        lamp.position[2] = position.z;
+        for (int c = 0; c < 3; ++c)
+        {
+            lamp.color[c] = placement.colour[c];
+            lamp.uploadedColor[c] = placement.colour[c] * kLampLitIntensity;
+        }
+        lamp.attenuation[0] = 1.0f;
+        lamp.attenuation[2] = placement.quadraticAttenuation;
+        lamp.cutoff = kFitLampCutoff;
+    }
+    return v.in;
+}
+
+void CheckFitCarriesTheLocalLightGain()
+{
+    const FrameInputs lit = LampsAroundTheCameraInputs();
+    FogParams fog = HomogeneousFog(kLampLitDensity, 0.0f);
+    const StockFogFitLight light = {1.0f, 0.0f, lit.localLights.pointLightCount, kFitLampPhase};
+    const StockFogFit plain = FitStockFog(fog, lit, light);
+    fog.localLightGain = kFitLocalLightGain;
+    const StockFogFit gained = FitStockFog(fog, lit, light);
+    const int shifts[3] = {16, 8, 0};
+    bool brighter = false;
+    bool darker = false;
+    for (int shift : shifts)
+    {
+        const uint32_t before = (plain.colour >> shift) & 0xFF;
+        const uint32_t after = (gained.colour >> shift) & 0xFF;
+        brighter = brighter || after > before;
+        darker = darker || after < before;
+    }
+    std::printf("     lamp-lit fog: fitted colour %06X, %06X with local light gain %.1f; range %.1f..%.1f yd, "
+                "%.1f..%.1f yd\n",
+                plain.colour & 0xFFFFFF, gained.colour & 0xFFFFFF, kFitLocalLightGain, plain.start, plain.end,
+                gained.start, gained.end);
+    Check(plain.fogs && gained.fogs && brighter && !darker && plain.start == gained.start && plain.end == gained.end,
+          "the fitted stock fog of see-through batches takes the march's local light gain: the lamps' "
+          "in-scatter brightens and the fitted fog range stays");
+}
+
 bool SameArgs(const M2BatchFogArgs& a, const M2BatchFogArgs& b)
 {
     return std::memcmp(&a, &b, sizeof(a)) == 0;
@@ -454,10 +511,161 @@ void CheckBatchFogKeepsBlendModeColours()
     Check(SameArgs(before, untouched), "a fit without fog leaves the client's pushed fog arguments bit-identical");
 }
 
+constexpr float kObjectAhead = 50.0f;
+constexpr float kObjectTransmittanceLimit = 0.01f;
+constexpr Vec3 kObjectBesideTheNearLamp = {6.0f, 2.5f, 1.0f};
+constexpr Vec3 kObjectAwayFromTheLamps = {60.0f, 30.0f, 0.0f};
+
+float ClientFactorAt(float start, float end, float viewDepth)
+{
+    return std::fmin(std::fmax((end - viewDepth) / (end - start), 0.0f), 1.0f);
+}
+
+int ColourSum(uint32_t colour)
+{
+    return static_cast<int>(((colour >> 16) & 0xFF) + ((colour >> 8) & 0xFF) + (colour & 0xFF));
+}
+
+bool FogAtObject(const StockFogFit& fit, Vec3 world, ObjectFog& fog)
+{
+    const float position[3] = {world.x, world.y, world.z};
+    return FitObjectFog(fit, position, fog);
+}
+
+void CheckObjectFogOnTheViewAxis()
+{
+    const View v;
+    const FogParams fog = HomogeneousFog(kRegressionDensity, kEmissiveFog);
+    const StockFogFit fit = FitStockFog(fog, v.in, {1.0f, 0.0f});
+    ObjectFog ahead;
+    const bool fitted = FogAtObject(fit, Add(v.eye, {kObjectAhead, 0.0f, 0.0f}), ahead);
+    const float reference = ReferenceTransmittance(fog, v.in.camPos[2], v.in.cameraRelativeView[10], kObjectAhead);
+    const float factor = ClientFactorAt(ahead.start, ahead.end, ahead.viewDepth);
+    ObjectFog behind;
+    const bool fittedBehind = FogAtObject(fit, Add(v.eye, {-kObjectAhead, 0.0f, 0.0f}), behind);
+    std::printf("     object %.0f yd ahead: view depth %.2f, transmittance %.4f (reference %.4f), client factor %.4f, "
+                "colour %06X (screen line %06X); behind the camera fitted %d\n",
+                kObjectAhead, ahead.viewDepth, ahead.transmittance, reference, factor, ahead.colour & 0xFFFFFFu,
+                fit.colour & 0xFFFFFFu, fittedBehind);
+    Check(fitted && ahead.fogs && std::fabs(ahead.viewDepth - kObjectAhead) < 0.01f &&
+              std::fabs(ahead.transmittance - reference) < kObjectTransmittanceLimit &&
+              std::fabs(factor - (1.0f - ahead.displayOpacity)) < 0.001f && !fittedBehind,
+          "a see-through model on the view axis takes the volumetric transmittance at its own depth, through the "
+          "client's linear fog at its own planar depth, and a model behind the camera is left to the screen's line");
+}
+
+float ChannelOf(uint32_t colour, int shift)
+{
+    return static_cast<float>((colour >> shift) & 0xFF) / 255.0f;
+}
+
+float CompositeOnScreen(float scene, float transmittance, float exposedScatter)
+{
+    const float linear = std::pow(scene, 2.2f) * transmittance + exposedScatter;
+    const float knee = std::fmax(0.8f, std::pow(scene, 2.2f));
+    const float span = std::fmax(1.0f - knee, 1e-4f);
+    const float rolled = linear <= knee ? linear : knee + span * (1.0f - std::exp(-(linear - knee) / span));
+    return std::pow(rolled, 1.0f / 2.2f);
+}
+
+void CheckObjectFogMatchesTheLinearComposite()
+{
+    const View v;
+    const FogParams fog = HomogeneousFog(kRegressionDensity, kEmissiveFog);
+    const StockFogFit fit = FitStockFog(fog, v.in, {1.0f, 0.0f});
+    ObjectFog ahead;
+    const bool fitted = FogAtObject(fit, Add(v.eye, {kObjectAhead, 0.0f, 0.0f}), ahead);
+    const int shifts[3] = {16, 8, 0};
+    const float objects[3] = {0.0f, 0.5f, 1.0f};
+    float largest = 0.0f;
+    float largestAtTheEnds = 0.0f;
+    float darkScreenLine = 0.0f;
+    float darkComposite = 0.0f;
+    for (float object : objects)
+        for (int c = 0; c < 3; ++c)
+        {
+            const float exposed = ahead.scatterPerOpacity[c] * (1.0f - ahead.transmittance);
+            const float composite = CompositeOnScreen(object, ahead.transmittance, exposed);
+            const float client = object * (1.0f - ahead.displayOpacity) +
+                                 ChannelOf(ahead.colour, shifts[c]) * ahead.displayOpacity;
+            largest = std::fmax(largest, std::fabs(client - composite));
+            if (object != 0.5f)
+                largestAtTheEnds = std::fmax(largestAtTheEnds, std::fabs(client - composite));
+            if (object == 0.0f && c == 1)
+            {
+                darkComposite = composite;
+                darkScreenLine = ChannelOf(fit.colour, shifts[c]) * (1.0f - ahead.transmittance);
+            }
+        }
+    std::printf("     object fog in gamma: opacity %.3f (volumetric %.3f), colour %06X; largest difference from the "
+                "linear composite over black and white %.3f, over grey %.3f; a black model's green: composite %.3f, "
+                "line colour at the volumetric opacity %.3f\n",
+                ahead.displayOpacity, 1.0f - ahead.transmittance, ahead.colour & 0xFFFFFFu, largestAtTheEnds, largest,
+                darkComposite, darkScreenLine);
+    Check(fitted && largestAtTheEnds < 0.01f && largest < 0.11f && darkScreenLine < darkComposite - 0.05f,
+          "the client's gamma-space lerp with the object's fog matches the composite's linear-light blend over black "
+          "and white within 0.01 and over grey within 0.11, where the volumetric opacity with the plain fog colour "
+          "leaves a black model darker than the fog drawn around it");
+}
+
+void CheckObjectFogNearALamp()
+{
+    const FrameInputs lit = LampsAroundTheCameraInputs();
+    const View v;
+    const FogParams fog = HomogeneousFog(kLampLitDensity, 0.0f);
+    const StockFogFit fit = FitStockFog(fog, lit, {1.0f, 0.0f, lit.localLights.pointLightCount, kFitLampPhase});
+    ObjectFog nearLamp;
+    ObjectFog away;
+    const bool fitted = FogAtObject(fit, Add(v.eye, kObjectBesideTheNearLamp), nearLamp) &&
+                        FogAtObject(fit, Add(v.eye, kObjectAwayFromTheLamps), away);
+    std::printf("     fog colour beside the near lamp %06X, away from the lamps %06X, screen line %06X\n",
+                nearLamp.colour & 0xFFFFFFu, away.colour & 0xFFFFFFu, fit.colour & 0xFFFFFFu);
+    Check(fitted && nearLamp.fogs && away.fogs && ColourSum(nearLamp.colour) > ColourSum(fit.colour) &&
+              ColourSum(nearLamp.colour) > ColourSum(away.colour),
+          "a see-through model beside a lamp takes the brighter fog the lamp lights there, not the screen's mean");
+}
+
+void CheckObjectPlacement()
+{
+    const float camera[3] = {100.0f, 200.0f, 10.0f};
+    const float model[3] = {130.0f, 240.0f, 10.0f};
+    const bool exact = PlacementMatchesCamera(model, 2500.0f, camera);
+    const bool attached = PlacementMatchesCamera(model, 2800.0f, camera);
+    struct FakeModel
+    {
+        unsigned char bytes[0x130] = {};
+    } fakeModel;
+    struct FakeBatchState
+    {
+        unsigned char bytes[0x100] = {};
+    } fakeState;
+    const uintptr_t modelAddress = reinterpret_cast<uintptr_t>(&fakeModel);
+    std::memcpy(fakeState.bytes + 0x60, &modelAddress, sizeof(modelAddress));
+    std::memcpy(fakeModel.bytes + 0xE4, model, sizeof(model));
+    const float distanceSquared = 2500.0f;
+    std::memcpy(fakeModel.bytes + 0x88, &distanceSquared, sizeof(distanceSquared));
+    engine::M2ModelPlacement placement;
+    const bool read = vf_test_read_m2_model_placement(&fakeState, &placement) != 0;
+    std::printf("     placement read %d: model at (%.0f %.0f %.0f), camera distance squared %.0f; matches the camera "
+                "%d, a parent's distance %d\n",
+                read, placement.world[0], placement.world[1], placement.world[2], placement.cameraDistanceSquared,
+                exact, attached);
+    Check(read && placement.model == modelAddress && placement.world[0] == model[0] &&
+              placement.world[1] == model[1] && placement.cameraDistanceSquared == distanceSquared && exact &&
+              !attached && vf_test_read_m2_model_placement(nullptr, &placement) == 0,
+          "the batch state's model (+0x60) gives the model's world translation (+0xE4) and camera distance squared "
+          "(+0x88), and a translation that does not match that distance is not used");
+}
+
 void CheckStockFogFit(const FogData& classic)
 {
     CheckFitAgainstTheVolumetricFog(classic);
     CheckBatchFogKeepsBlendModeColours();
+    CheckFitCarriesTheLocalLightGain();
+    CheckObjectFogOnTheViewAxis();
+    CheckObjectFogMatchesTheLinearComposite();
+    CheckObjectFogNearALamp();
+    CheckObjectPlacement();
 }
 
 void CheckTransparentFogSetting(const std::wstring& outDir, const std::wstring& shippedIni)
@@ -466,27 +674,29 @@ void CheckTransparentFogSetting(const std::wstring& outDir, const std::wstring& 
     shipped.Load(NarrowPath(shippedIni));
     const std::string text = ReadText(shippedIni);
     const std::vector<std::string> lines = water_settings_checks::IniLines(text);
-    Check(!shipped.Get().transparentFog && !Config().transparentFog &&
-              std::count(lines.begin(), lines.end(), std::string("TransparentFog=0")) == 1 &&
+    Check(shipped.Get().transparentFog && Config().transparentFog &&
+              std::count(lines.begin(), lines.end(), std::string("TransparentFog=1")) == 1 &&
+              std::count(lines.begin(), lines.end(), std::string("TransparentFog=0")) == 0 &&
               text.find("; 1 = fog particles, spell effects and other see-through models by their own distance") !=
-                  std::string::npos,
-          "the shipped INI and the built-in default keep TransparentFog=0 until an owner test, and the INI documents "
-          "the key");
+                  std::string::npos &&
+              text.find("; 0 = the fallback if distant effects look wrongly fogged") != std::string::npos,
+          "the shipped INI and the built-in default turn TransparentFog on after a tester's game test, and the INI "
+          "documents the key with 0 as the fallback");
 
     const std::wstring savedIni = FullPath(outDir + L"\\transparent-fog.ini");
     CopyFileW(shippedIni.c_str(), savedIni.c_str(), FALSE);
     ConfigStore store;
     store.Load(NarrowPath(savedIni));
     Config edited = store.Get();
-    edited.transparentFog = true;
+    edited.transparentFog = false;
     const std::string changes = SettingChanges(store.Get(), edited);
     store.Apply(edited);
     const bool saved = store.Save();
     ConfigStore reloaded;
     reloaded.Load(NarrowPath(savedIni));
     std::printf("     the settings window's TransparentFog change logs \"%s\"\n", changes.c_str());
-    Check(saved && reloaded.Get().transparentFog && changes == "TransparentFog 0 -> 1" &&
-              ReadText(savedIni).find("\nTransparentFog=1") != std::string::npos &&
+    Check(saved && !reloaded.Get().transparentFog && changes == "TransparentFog 1 -> 0" &&
+              ReadText(savedIni).find("\nTransparentFog=0") != std::string::npos &&
               !SameFogSettings(reloaded.Get(), shipped.Get()),
           "a TransparentFog change is logged, saved to the INI, read back and counts as a fog setting change");
 }
@@ -671,11 +881,13 @@ struct WorldTextCapture
     IDirect3DDevice9* dev = nullptr;
     Image image;
     int draws = 0;
+    DWORD depthWrite = TRUE;
 };
 
 void __cdecl CaptureAtWorldText(void* batch)
 {
     WorldTextCapture& capture = *static_cast<WorldTextCapture*>(batch);
+    capture.dev->GetRenderState(D3DRS_ZWRITEENABLE, &capture.depthWrite);
     capture.image = Capture(capture.dev);
     ++capture.draws;
 }
@@ -696,10 +908,12 @@ struct FrameOptions
     bool captureAfterLiquid = false;
     bool keepStateAround = false;
     bool unbindDepthAtLiquidEnd = false;
+    bool unbindDepthAtWorldDone = false;
     bool readDepthAtLiquidEnd = false;
     const DepthTexel* depthTexels = nullptr;
     void (*drawOverBackdrop)(Harness& h) = nullptr;
     WorldTextCapture* worldText = nullptr;
+    bool worldTextBeforeGlare = false;
 };
 
 struct HookedFrame
@@ -744,12 +958,12 @@ bool KeepsState(Harness& h, const View& v, void (*entry)())
     return kept;
 }
 
-void EndLiquidWithDepthUnbound(Harness& h)
+void CallWithDepthUnbound(Harness& h, void (*entry)())
 {
     IDirect3DSurface9* bound = nullptr;
     h.dev->GetDepthStencilSurface(&bound);
     h.dev->SetDepthStencilSurface(nullptr);
-    vf_test_hook_liquid_end();
+    entry();
     h.dev->SetDepthStencilSurface(bound);
     if (bound)
         bound->Release();
@@ -759,7 +973,7 @@ void EndLiquid(Harness& h, const View& v, const FrameOptions& options, HookedFra
 {
     const int before = g_glarePasses;
     if (options.unbindDepthAtLiquidEnd)
-        EndLiquidWithDepthUnbound(h);
+        CallWithDepthUnbound(h, &vf_test_hook_liquid_end);
     else if (options.keepStateAround)
         frame.stateKept = KeepsState(h, v, &vf_test_hook_liquid_end) && frame.stateKept;
     else
@@ -798,15 +1012,19 @@ HookedFrame RenderHookedFrame(Harness& h, const View& v, const Config& cfg, cons
     DrawBackdropFor(h, v, options);
     EndLiquid(h, v, options, frame);
     DrawEffect(h, v, options, shaders, frame);
+    if (options.worldText && options.worldTextBeforeGlare)
+        CallWorldTextThunk(*options.worldText);
     const int beforeOwnCall = g_glarePasses;
     if (options.keepStateAround)
         frame.stateKept = KeepsState(h, v, &CallGlarePassThunk) && frame.stateKept;
     else
         CallGlarePassThunk();
     frame.glarePassesAtOwnCall = g_glarePasses - beforeOwnCall;
-    if (options.worldText)
+    if (options.worldText && !options.worldTextBeforeGlare)
         CallWorldTextThunk(*options.worldText);
-    if (options.keepStateAround)
+    if (options.unbindDepthAtWorldDone)
+        CallWithDepthUnbound(h, &vf_test_hook_world_done);
+    else if (options.keepStateAround)
         frame.stateKept = KeepsState(h, v, &vf_test_hook_world_done) && frame.stateKept;
     else
         vf_test_hook_world_done();
@@ -972,37 +1190,113 @@ void CheckTransparentsFoggedAtOwnDepth(Harness& h)
           "behind it");
 }
 
+struct ScreenPoint
+{
+    float x = 0;
+    float y = 0;
+};
+
+ScreenPoint SunOnScreen(const View& v)
+{
+    float sunDir[3];
+    TransformDirection(v.in.toLight, v.view, sunDir);
+    return {v.world.X + (sunDir[0] / sunDir[2] * v.proj[0] * 0.5f + 0.5f) * v.world.Width,
+            v.world.Y + (0.5f - sunDir[1] / sunDir[2] * v.proj[5] * 0.5f) * v.world.Height};
+}
+
+void DrawTrunksBeforeTheSun(Harness& h)
+{
+    const View v;
+    god_ray_shafts::DrawTrunks(h, SunOnScreen(v).x, static_cast<float>(v.world.Y + v.world.Height),
+                               v.RawDepthAt(god_ray_shafts::kTrunkDistance));
+}
+
 void CheckGodRaysAfterTheWorld(Harness& h)
 {
     const View v;
     FrameOptions options;
     options.captureAfterLiquid = true;
+    options.drawOverBackdrop = &DrawTrunksBeforeTheSun;
     Config cfg = HookConfig(true);
     cfg.godRays = kRaysOn;
     const HookedFrame rays = RenderSettledHookedFrame(h, v, cfg, options);
-    float sunDir[3];
-    TransformDirection(v.in.toLight, v.view, sunDir);
-    const float sunX = v.world.X + (sunDir[0] / sunDir[2] * v.proj[0] * 0.5f + 0.5f) * v.world.Width;
-    const float sunY = v.world.Y + (0.5f - sunDir[1] / sunDir[2] * v.proj[5] * 0.5f) * v.world.Height;
-    const UINT x0 = static_cast<UINT>(std::fmax(sunX - kRaySunRegion, 0.0f));
-    const UINT y0 = static_cast<UINT>(std::fmax(sunY - kRaySunRegion, 0.0f));
-    const UINT x1 = static_cast<UINT>(std::fmin(sunX + kRaySunRegion, static_cast<float>(v.world.Width)));
-    const UINT y1 = static_cast<UINT>(std::fmin(sunY + kRaySunRegion, static_cast<float>(v.world.Height)));
+    const ScreenPoint sun = SunOnScreen(v);
+    const UINT x0 = static_cast<UINT>(std::fmax(sun.x - kRaySunRegion, 0.0f));
+    const UINT y0 = static_cast<UINT>(std::fmax(sun.y - kRaySunRegion, 0.0f));
+    const UINT x1 = static_cast<UINT>(std::fmin(sun.x + kRaySunRegion, static_cast<float>(v.world.Width)));
+    const UINT y1 = static_cast<UINT>(std::fmin(sun.y + kRaySunRegion, static_cast<float>(v.world.Height)));
+    const D3DVIEWPORT9 sunRegion = {x0, y0, x1 - x0, y1 - y0, 0.0f, 1.0f};
     const double gain = MeanLumaChange(rays.afterLiquid, rays.image, x0, y0, x1, y1);
+    const int brightest = LargestDifference(rays.afterLiquid, rays.image, sunRegion);
     const int darkening = LargestDarkening(rays.afterLiquid, rays.image, v.world);
     Config wholeFrameCfg = HookConfig(false);
     wholeFrameCfg.godRays = kRaysOn;
     const HookedFrame wholeFrameRays = RenderSettledHookedFrame(h, v, wholeFrameCfg, options);
     const int wholeFrameDifference = LargestDifference(rays.image, wholeFrameRays.image, v.world);
-    std::printf("     god rays after the early composite: mean luma change %.4f around the sun (%.0f, %.0f), largest "
-                "darkening %d/255, largest difference from the single composite's god rays %d/255\n",
-                gain, sunX, sunY, darkening, wholeFrameDifference);
-    Check(gain > kMinRayGain && darkening <= kMaxRayDarkening,
-          "with TransparentFog=1 the god rays are added over the finished world at the end of the world render and "
-          "darken nothing");
+    std::printf("     god rays between trunks after the early composite: mean luma change %.4f around the sun (%.0f, "
+                "%.0f), brightest shaft +%d/255, largest darkening %d/255, largest difference from the single "
+                "composite's god rays %d/255\n",
+                gain, sun.x, sun.y, brightest, darkening, wholeFrameDifference);
+    Check(brightest >= kMinShaftLevels && darkening <= kMaxRayDarkening,
+          "with TransparentFog=1 the god rays between trunks in front of the sun are added over the finished world at "
+          "the end of the world render and darken nothing");
     Check(wholeFrameDifference <= kMaxLateRayDifference,
           "the god rays drawn after the early composite come from the scene before the fog, as the single "
           "composite's do, and match them");
+}
+
+void CheckFailedLateGodRaysKeepTheFogHistory(Harness& h)
+{
+    const View v;
+    Config cfg = HookConfig(true);
+    cfg.godRays = kRaysOn;
+    cfg.temporal = kTemporalOn;
+    cfg.logLevel = static_cast<int>(LogLevel::Info);
+    RenderSettledHookedFrame(h, v, cfg, FrameOptions());
+    const bool keptAfterDrawnRays = vf_test_fog_history_valid() != 0;
+    FrameOptions depthUnbound;
+    depthUnbound.unbindDepthAtWorldDone = true;
+    const size_t start = water_settings_checks::DllLogSize();
+    RenderHookedFrame(h, v, cfg, depthUnbound);
+    const bool keptAfterFailedRays = vf_test_fog_history_valid() != 0;
+    const size_t skipped =
+        water_settings_checks::CountOf(runtime_cost::LogWrittenSince(start), kLateRaysDepthUnboundLine);
+    std::printf("     fog history after late god rays drawn: %s; after late god rays skipped (%zu lines \"%s\"): %s\n",
+                keptAfterDrawnRays ? "valid" : "discarded", skipped, kLateRaysDepthUnboundLine,
+                keptAfterFailedRays ? "valid" : "discarded");
+    Check(keptAfterDrawnRays && skipped == 1 && keptAfterFailedRays,
+          "with TransparentFog=1, Temporal>0 and god rays, late god rays that fail at the end of the world leave "
+          "the fog's temporal history valid for the next frame: the late pass never touches the fog targets");
+}
+
+void CheckFailedRaySourceCopyDrawsNoRays(Harness& h)
+{
+    const View v;
+    FrameOptions options;
+    options.captureAfterLiquid = true;
+    options.drawOverBackdrop = &DrawTrunksBeforeTheSun;
+    Config wholeFrame = HookConfig(false);
+    wholeFrame.godRays = kRaysOn;
+    Config early = HookConfig(true);
+    early.godRays = kRaysOn;
+    RenderSettledHookedFrame(h, v, wholeFrame, options);
+    const HookedFrame withoutRays = RenderSettledHookedFrame(h, v, HookConfig(false), options);
+    const size_t start = water_settings_checks::DllLogSize();
+    vf_test_fail_ray_source_copy(1);
+    const HookedFrame whole = RenderHookedFrame(h, v, wholeFrame, options);
+    const HookedFrame late = RenderHookedFrame(h, v, early, options);
+    vf_test_fail_ray_source_copy(0);
+    const size_t logged =
+        water_settings_checks::CountOf(runtime_cost::LogWrittenSince(start), kRaySourceCopyFailedLine);
+    const int wholeDifference = LargestDifference(whole.image, withoutRays.image, v.world);
+    const int lateDifference = LargestDifference(late.afterLiquid, late.image, v.world);
+    std::printf("     god-ray source copy failing after frames with rays: single composite vs no god rays %d/255, "
+                "end of the world adds %d/255 after the early composite, %zu failure lines\n",
+                wholeDifference, lateDifference, logged);
+    Check(wholeDifference == 0 && lateDifference == 0 && logged == 1,
+          "when the scene copy the god rays are drawn from fails, no rays are drawn from its stale or undefined "
+          "contents, neither in the single composite nor after the early composite, and the failure is logged "
+          "once");
 }
 
 Config LampLitConfig()
@@ -1027,7 +1321,7 @@ View LampLitView(const Config& cfg)
             lamp.color[c] = placement.colour[c];
         lamp.attenuation[0] = 1.0f;
         lamp.attenuation[2] = placement.quadraticAttenuation;
-        engine::SelectLocalPointLight(v.in.localLights, lamp, v.in.camPos, LocalLightUpload(cfg));
+        engine::SelectLocalPointLight(v.in.localLights, lamp, v.in.camPos, LocalLightUpload(cfg, CameraPlace(v.in)));
     }
     return v;
 }
@@ -1185,6 +1479,27 @@ void CheckFogDrawnBeforeWorldText(Harness& h)
           "again after the world, so names in front of the sky are not hidden by the sky's fog");
 }
 
+void CheckWorldTextBeforeTheGlare(Harness& h)
+{
+    const View v;
+    const Config cfg = HookConfig(false);
+    const HookedFrame plain = RenderSettledHookedFrame(h, v, cfg, FrameOptions());
+    WorldTextCapture text;
+    text.dev = h.dev;
+    FrameOptions options;
+    options.worldText = &text;
+    options.worldTextBeforeGlare = true;
+    const HookedFrame named = RenderSettledHookedFrame(h, v, cfg, options);
+    const int atText = LargestDifference(text.image, plain.image, v.world);
+    const int afterWorld = LargestDifference(named.image, plain.image, v.world);
+    std::printf("     world text before the glare drawn %d times; frame at the text vs the fogged frame %d/255, final "
+                "frame %d/255\n",
+                text.draws, atText, afterWorld);
+    Check(text.draws == kWarmUpFrames && atText > 0 && afterWorld == 0,
+          "with TransparentFog=0, world text the client draws before the glare pass (as with a unit targeted) does "
+          "not draw the fog early, so see-through models drawn after it, such as banners, are still fogged");
+}
+
 struct Fallback
 {
     const char* name;
@@ -1310,6 +1625,143 @@ void CheckThunksAndGlarePass(Harness& h)
           "again in the next frame");
 }
 
+int g_uploadedFogOn = -1;
+
+void __cdecl RecordFogUpload(int fogOn)
+{
+    g_uploadedFogOn = fogOn;
+}
+
+struct FakeM2Material
+{
+    uint8_t flags;
+    uint8_t unused;
+    uint16_t blendMode;
+};
+
+constexpr uint8_t kUnfoggedMaterialFlag = 0x2;
+constexpr uint16_t kAlphaBlendMode = 2;
+constexpr uint16_t kAddBlendMode = 4;
+constexpr uint16_t kUnknownBlendMode = 9;
+constexpr size_t kM2BatchMaterialOffset = 0x98;
+
+struct FakeM2Batch
+{
+    unsigned char fields[kM2BatchMaterialOffset] = {};
+    const FakeM2Material* material = nullptr;
+};
+
+struct UnfoggedBatchCall
+{
+    ThunkCall registers;
+    RecordedFog fog;
+    int uploadedFogOn;
+};
+
+UnfoggedBatchCall CallThroughUnfoggedBatchThunk(const void* thunk, const FakeM2Batch& batch)
+{
+    g_recordedFog = {};
+    g_uploadedFogOn = -1;
+    const FakeM2Batch* batchAddress = &batch;
+    uint32_t esiAfter = 0;
+    uint32_t ediAfter = 0;
+    uint32_t ebxAfter = 0;
+    uint32_t stackBefore = 0;
+    uint32_t stackAfter = 0;
+    __asm {
+        push esi
+        push edi
+        push ebx
+        mov esi, batchAddress
+        mov edi, kSentinelEdi
+        xor ebx, ebx
+        mov stackBefore, esp
+        push ebx
+        call thunk
+        add esp, 4
+        mov stackAfter, esp
+        mov esiAfter, esi
+        mov ediAfter, edi
+        mov ebxAfter, ebx
+        pop ebx
+        pop edi
+        pop esi
+    }
+    return {{esiAfter, ediAfter, ebxAfter, stackBefore, stackAfter}, g_recordedFog, g_uploadedFogOn};
+}
+
+bool UnfoggedCallerKept(const UnfoggedBatchCall& call, const FakeM2Batch& batch)
+{
+    return call.registers.esi == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&batch)) &&
+           call.registers.edi == kSentinelEdi && call.registers.ebx == 0 &&
+           call.registers.stackBefore == call.registers.stackAfter;
+}
+
+bool LeftUnfogged(const UnfoggedBatchCall& call)
+{
+    return call.uploadedFogOn == 0 && !call.fog.colour;
+}
+
+bool FoggedByTheFit(const UnfoggedBatchCall& call)
+{
+    return call.uploadedFogOn == 1 && call.fog.colour && call.fog.start != call.fog.end &&
+           call.fog.exponent == kLinearStockFogExponent;
+}
+
+void CheckUnfoggedBatchesTakeTheFit(Harness& h)
+{
+    vf_test_m2_batch_fog_thunk(reinterpret_cast<uintptr_t>(&RecordM2BatchFog));
+    const void* thunk = vf_test_m2_unfogged_batch_thunk(reinterpret_cast<uintptr_t>(&RecordFogUpload));
+    const FakeM2Material additive = {kUnfoggedMaterialFlag, 0, kAddBlendMode};
+    const FakeM2Material alpha = {kUnfoggedMaterialFlag, 0, kAlphaBlendMode};
+    const FakeM2Material unknown = {kUnfoggedMaterialFlag, 0, kUnknownBlendMode};
+    FakeM2Batch additiveBatch;
+    additiveBatch.material = &additive;
+    FakeM2Batch alphaBatch;
+    alphaBatch.material = &alpha;
+    FakeM2Batch unknownBatch;
+    unknownBatch.material = &unknown;
+    const UnfoggedBatchCall unarmed = CallThroughUnfoggedBatchThunk(thunk, additiveBatch);
+
+    const View v;
+    Config cfg = HookConfig(true);
+    vf_test_set_config(&cfg);
+    RenderSettledHookedFrame(h, v, cfg, FrameOptions());
+    vf_test_glare_pass_thunk(reinterpret_cast<uintptr_t>(&RecordGlarePass));
+    vf_test_use_fog_hook_client(&v.in);
+    vf_test_hook_frame_begin();
+    h.BeginFrame();
+    h.DrawScene(v.eye, v.view, v.proj, v.world);
+    const UnfoggedBatchCall beforeLiquidEnd = CallThroughUnfoggedBatchThunk(thunk, additiveBatch);
+    vf_test_hook_liquid_end();
+    const UnfoggedBatchCall additiveArmed = CallThroughUnfoggedBatchThunk(thunk, additiveBatch);
+    const UnfoggedBatchCall alphaArmed = CallThroughUnfoggedBatchThunk(thunk, alphaBatch);
+    const UnfoggedBatchCall unknownArmed = CallThroughUnfoggedBatchThunk(thunk, unknownBatch);
+    vf_test_hook_world_done();
+    h.dev->EndScene();
+    vf_test_hook_frame_end();
+    h.dev->Present(nullptr, nullptr, nullptr, nullptr);
+    const UnfoggedBatchCall afterFrame = CallThroughUnfoggedBatchThunk(thunk, additiveBatch);
+
+    std::printf("     unfogged M2 batch thunk: armed additive start %.1f end %.1f colour %08X, alpha colour %08X; "
+                "fog uploaded %d unarmed, %d armed\n",
+                additiveArmed.fog.start, additiveArmed.fog.end, additiveArmed.fog.colourValue,
+                alphaArmed.fog.colourValue, unarmed.uploadedFogOn, additiveArmed.uploadedFogOn);
+    Check(LeftUnfogged(unarmed) && LeftUnfogged(beforeLiquidEnd) && LeftUnfogged(afterFrame) &&
+              UnfoggedCallerKept(unarmed, additiveBatch) && UnfoggedCallerKept(afterFrame, additiveBatch),
+          "the unfogged M2 batch thunk passes the client's fog-off upload through while the transparent fog is not "
+          "armed, and keeps esi, edi, ebx and the stack");
+    Check(FoggedByTheFit(additiveArmed) && additiveArmed.fog.colourValue == kAdditiveFogColour &&
+              FoggedByTheFit(alphaArmed) && UsesLightingFogColour(alphaArmed.fog.colourValue) &&
+              alphaArmed.fog.start == additiveArmed.fog.start && alphaArmed.fog.end == additiveArmed.fog.end &&
+              UnfoggedCallerKept(additiveArmed, additiveBatch) && UnfoggedCallerKept(alphaArmed, alphaBatch),
+          "after the early composite a batch the client draws unfogged, such as a lamp glow, takes the fitted fog "
+          "with the colour of its blend mode (black for additive, the fitted colour for alpha) and the fog upload "
+          "turns fog on");
+    Check(LeftUnfogged(unknownArmed),
+          "an unfogged batch with a blend mode outside the client's fog table stays unfogged");
+}
+
 void CallM2BatchFog(uint32_t colour, float exponent)
 {
     M2BatchFogArgs args = {kPushedStockFogStart, kPushedStockFogEnd, exponent, &colour};
@@ -1409,6 +1861,43 @@ void CheckM2HookFaultKeepsTheFog(Harness& h)
           "drawn after the world, as with TransparentFog=0");
 }
 
+bool FogPassFaultKeepsClientState(Harness& h, const View& v, const Config& cfg)
+{
+    vf_test_set_config(&cfg);
+    vf_test_use_fog_hook_client(&v.in);
+    vf_test_hook_frame_begin();
+    h.BeginFrame();
+    h.DrawScene(v.eye, v.view, v.proj, v.world);
+    vf_test_fail_fog_pass(1);
+    const bool kept = KeepsState(h, v, &vf_test_hook_world_done);
+    vf_test_fail_fog_pass(0);
+    h.dev->EndScene();
+    vf_test_hook_frame_end();
+    h.dev->Present(nullptr, nullptr, nullptr, nullptr);
+    return kept;
+}
+
+void CheckFogPassFaultRestoresTheClient(Harness& h)
+{
+    const View v;
+    const Config cfg = HookConfig(false);
+    RenderSettledHookedFrame(h, v, cfg, FrameOptions());
+    const size_t start = water_settings_checks::DllLogSize();
+    const bool kept = FogPassFaultKeepsClientState(h, v, cfg);
+    const size_t faults = water_settings_checks::CountOf(runtime_cost::LogWrittenSince(start), kFogPassFaultLine);
+    vf_test_simulate_fog_hook_failure(0);
+    const HRESULT reset = h.dev->Reset(&h.pp);
+    std::printf("     exception inside the fog passes at the world-done hook: %zu fault lines, client state %s, Reset "
+                "0x%08lX\n",
+                faults, kept ? "kept" : "changed", static_cast<unsigned long>(reset));
+    Check(faults == 1 && kept,
+          "an exception inside the fog passes, caught by the world-done hook, still gives the client back its "
+          "render target, depth surface, shaders, declaration, stream 0 and render state");
+    Check(SUCCEEDED(reset),
+          "after an exception inside the fog passes the device resets: the fog holds no reference to the client's "
+          "render target, depth surface or stream 0");
+}
+
 void CheckTransparentFog(Harness& h)
 {
     Config saved;
@@ -1416,14 +1905,19 @@ void CheckTransparentFog(Harness& h)
     CheckEarlyCompositeMatchesWholeFrame(h);
     CheckTransparentsFoggedAtOwnDepth(h);
     CheckGodRaysAfterTheWorld(h);
+    CheckFailedLateGodRaysKeepTheFogHistory(h);
+    CheckFailedRaySourceCopyDrawsNoRays(h);
     CheckFittedColourCarriesThePointLights(h);
     CheckHookedFogRestoresState(h);
     CheckFogDrawnBeforeWorldText(h);
+    CheckWorldTextBeforeTheGlare(h);
     CheckWholeFrameFallbacks(h);
     CheckEarlyCompositeFailureLogged(h);
     CheckThunksAndGlarePass(h);
+    CheckUnfoggedBatchesTakeTheFit(h);
     CheckStageZeroCounts(h);
     CheckM2HookFaultKeepsTheFog(h);
+    CheckFogPassFaultRestoresTheClient(h);
     vf_test_set_config(&saved);
 }
 

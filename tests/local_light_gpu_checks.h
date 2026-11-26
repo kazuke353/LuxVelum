@@ -38,15 +38,18 @@ double PeakNormalisedPhase(double g, double cosAngle)
     return ratio * ratio * ratio;
 }
 
+constexpr double kCameraClearanceMaxStart = 50;
+
 Result Reference(const Medium& medium, const Light* lights, int count, double localLightPhase = 0)
 {
     constexpr int samples = 32768;
-    const double step = (medium.end - medium.start) / samples;
+    const double lampStart = medium.start < kCameraClearanceMaxStart ? 0 : medium.start;
+    const double step = (medium.end - lampStart) / samples;
     double integral[3] = {};
     for (int sample = 0; sample < samples; ++sample)
     {
-        const double distance = medium.start + (sample + 0.5) * step;
-        const double transmission = std::exp(-medium.density * (distance - medium.start));
+        const double distance = lampStart + (sample + 0.5) * step;
+        const double transmission = std::exp(-medium.density * (std::max)(distance - medium.start, 0.0));
         for (int light = 0; light < count; ++light)
         {
             const Light& source = lights[light];
@@ -145,6 +148,7 @@ Result Draw(IDirect3DDevice9* device, const FogIntegrationResources& resources, 
     constants[53][0] = static_cast<float>(count);
     constants[53][1] = marchLightLimit;
     constants[53][2] = scattering.localLightPhase;
+    constants[53][3] = 1;
     if (FAILED(device->SetPixelShaderConstantF(0, &constants[0][0], 99)))
         return result;
     const float quad[4][4] = {{-0.5f, -0.5f, 0, 1}, {7.5f, -0.5f, 0, 1},
@@ -342,6 +346,10 @@ void CheckLocalLightIntegration(IDirect3DDevice9* device)
             {{150, 0, 1000, {0.15, 0.35, 0.05}}, {150, 20, 40, {0.15, 0.35, 0.05}}}, 2, false},
         {"lamps separated by unlit fog add radiance", {100, 400, 0.01},
             {{140, 10, 25, {0.3, 0.7, 0.1}}, {300, 10, 40, {0.3, 0.7, 0.1}}}, 2, false},
+        {"a lamp inside a ground fog's camera clearance still glows", {15, 200, 0.01},
+            {{8, 1, 30, {0.3, 0.7, 0.1}}}, 1, false},
+        {"a lamp before a distant layer's start stays dark", {100, 200, 0.01},
+            {{20, 1, 30, {0.3, 0.7, 0.1}}}, 1, false},
     };
     constexpr int kScenarioCount = sizeof(scenarios) / sizeof(scenarios[0]);
     for (Light& light : scenarios[12].lights)

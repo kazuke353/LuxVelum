@@ -117,9 +117,9 @@ float PhaseHG(float g, float cosAngle)
     return r * r * r;
 }
 
-float LayerPhase(const FogLayer& layer, float cosAngle)
+float LayerPhase(const FogLayer& layer, float cosAngle, float haloShadow)
 {
-    const float hg = PhaseHG(layer.g, cosAngle);
+    const float hg = PhaseUnderHaloShadow(PhaseHG(layer.g, cosAngle), layer.g, haloShadow);
     return hg + (1.0f - hg) * layer.isotropic;
 }
 
@@ -142,6 +142,8 @@ struct RayLight
     float cameraHeight;
     float rise;
     float range;
+    float haloShadow;
+    float haloOccluderDistance;
 };
 
 struct FitPointLights
@@ -149,6 +151,7 @@ struct FitPointLights
     const LocalPointLight* lights = nullptr;
     uint32_t count = 0;
     float phase = 0.0f;
+    float gain = 1.0f;
     float relative[kMaxLocalPointLights][3] = {};
 };
 
@@ -196,7 +199,8 @@ void AccumulateLayer(const FogLayer& layer, const RayLight& ray, float stepStart
                                     HeightProfile(layer, ray.cameraHeight + ray.rise * sampleDistance) *
                                     shadowDensity;
     stepLayers.portions[stepLayers.count++] = {layerStart, layerStart + layerLength, layerOpticalDepth / layerLength};
-    const float directPhase = (1.0f - shadow) * LayerPhase(layer, ray.cosToLight);
+    const float haloShadow = sampleDistance < ray.haloOccluderDistance ? ray.haloShadow : 0.0f;
+    const float directPhase = (1.0f - shadow) * LayerPhase(layer, ray.cosToLight, haloShadow);
     for (int c = 0; c < 3; ++c)
     {
         const float emissive = layer.emissive[c] + (layer.shadowEmissive[c] - layer.emissive[c]) * shadow;
@@ -212,12 +216,13 @@ float StepOpacity(float opticalDepth)
                : 1.0f - std::exp(-opticalDepth);
 }
 
-FitPointLights UploadedPointLights(const FrameInputs& in, const StockFogFitLight& light)
+FitPointLights UploadedPointLights(const FogParams& fog, const FrameInputs& in, const StockFogFitLight& light)
 {
     FitPointLights points;
     points.lights = in.localLights.pointLights;
     points.count = std::min({light.uploadedPointLights, in.localLights.pointLightCount, kMaxLocalPointLights});
     points.phase = light.pointLightPhase;
+    points.gain = fog.localLightGain;
     for (uint32_t i = 0; i < points.count; ++i)
         for (int axis = 0; axis < 3; ++axis)
             points.relative[i][axis] = points.lights[i].position[axis] - in.camPos[axis];
@@ -314,7 +319,8 @@ void AccumulatePointLightPiece(const StepLayers& stepLayers, const RayPointLight
 {
     const float length = to - from;
     const float middle = from + 0.5f * length;
-    const float weightedDensity = kQuadratureWeight * length * PortionDensity(stepLayers, middle);
+    const float weightedDensity =
+        kQuadratureWeight * length * PortionDensity(stepLayers, middle) * lit.points->gain;
     if (weightedDensity <= 0.0f)
         return;
     for (int i = 0; i < lit.chordCount; ++i)
@@ -347,7 +353,8 @@ void IntegrateRay(const FogParams& fog, const FitPointLights& points, const FitR
                   float stepDepth, int steps, DepthSample* samples)
 {
     const RayLight ray = {Dot3(in.toLight, fitRay.world), fog.lightAboveHorizon, in.camPos[2],
-                          std::clamp(fitRay.world[2], -kMaxFitRise, kMaxFitRise), fog.maxDistance};
+                          std::clamp(fitRay.world[2], -kMaxFitRise, kMaxFitRise), fog.maxDistance, fog.haloShadow,
+                          fog.haloOccluderDistance};
     const RayPointLights lit = PointLightsAlong(points, fitRay.world);
     float transmittance = 1.0f;
     float inScatter[3] = {};
@@ -485,12 +492,17 @@ float ExtendedWindowDepth(const TransmittanceProfile& profile, float nearTransmi
     return kStockFogFitDepth + reach * (extended - kStockFogFitDepth);
 }
 
+float RollOffAbove(float colour, float knee)
+{
+    const float span = std::max(1.0f - knee, kMinHighlightSpan);
+    if (colour <= knee)
+        return colour;
+    return knee + span * (1.0f - std::exp(-(colour - knee) / span));
+}
+
 float RollOffHighlight(float colour)
 {
-    const float span = std::max(1.0f - kHighlightKnee, kMinHighlightSpan);
-    if (colour <= kHighlightKnee)
-        return colour;
-    return kHighlightKnee + span * (1.0f - std::exp(-(colour - kHighlightKnee) / span));
+    return RollOffAbove(colour, kHighlightKnee);
 }
 
 float BeforeClientGlow(float onScreen, float glow)
@@ -501,6 +513,54 @@ float BeforeClientGlow(float onScreen, float glow)
 uint32_t PackedChannel(float value, int shift)
 {
     return static_cast<uint32_t>(std::lround(std::clamp(value, 0.0f, 1.0f) * kChannelLevels)) << shift;
+}
+
+uint32_t PackedFogColour(const double* scattered, double opacity, bool linear, const StockFogFitLight& light)
+{
+    float colour[3] = {};
+    for (int c = 0; c < 3; ++c)
+    {
+        const float unpremultiplied =
+            opacity > 0.0 ? static_cast<float>(light.exposure * scattered[c] / opacity) : 0.0f;
+        colour[c] = RollOffHighlight(std::max(unpremultiplied, 0.0f));
+        if (linear)
+            colour[c] = BeforeClientGlow(std::pow(colour[c], 1.0f / kDisplayGamma), light.glowToCompensate);
+    }
+    return kLightingFogColourAlpha | PackedChannel(colour[0], 16) | PackedChannel(colour[1], 8) |
+           PackedChannel(colour[2], 0);
+}
+
+struct GammaBlend
+{
+    float opacity;
+    uint32_t colour;
+};
+
+float LinearBlendOnScreen(float scene, float transmittance, float exposedScatter)
+{
+    const float linear = scene * transmittance + exposedScatter;
+    return std::pow(RollOffAbove(linear, std::max(kHighlightKnee, scene)), 1.0f / kDisplayGamma);
+}
+
+GammaBlend GammaBlendOfLinearFog(const DepthSample& atObject, const StockFogFitLight& light)
+{
+    float overBlack[3];
+    float overWhite[3];
+    float opacity = 0.0f;
+    for (int c = 0; c < 3; ++c)
+    {
+        const float exposed = std::max(light.exposure * atObject.inScatter[c], 0.0f);
+        overBlack[c] = LinearBlendOnScreen(0.0f, atObject.transmittance, exposed);
+        overWhite[c] = LinearBlendOnScreen(1.0f, atObject.transmittance, exposed);
+        opacity += (1.0f - overWhite[c] + overBlack[c]) / 3.0f;
+    }
+    opacity = std::clamp(opacity, 0.0f, 1.0f);
+    float colour[3];
+    for (int c = 0; c < 3; ++c)
+        colour[c] = BeforeClientGlow(std::min(overBlack[c] / std::max(opacity, kMinFogOpacity), 1.0f),
+                                     light.glowToCompensate);
+    return {opacity, kLightingFogColourAlpha | PackedChannel(colour[0], 16) | PackedChannel(colour[1], 8) |
+                         PackedChannel(colour[2], 0)};
 }
 
 uint32_t FittedFogColour(const FitRay* rays, const RaySamples* samples, int rayCount, bool linear,
@@ -519,17 +579,13 @@ uint32_t FittedFogColour(const FitRay* rays, const RaySamples* samples, int rayC
                 scattered[c] += rays[r].weight * sample.inScatter[c];
             opacity += rays[r].weight * sampleOpacity;
         }
-    float colour[3] = {};
-    for (int c = 0; c < 3; ++c)
-    {
-        const float unpremultiplied =
-            opacity > 0.0 ? static_cast<float>(light.exposure * scattered[c] / opacity) : 0.0f;
-        colour[c] = RollOffHighlight(std::max(unpremultiplied, 0.0f));
-        if (linear)
-            colour[c] = BeforeClientGlow(std::pow(colour[c], 1.0f / kDisplayGamma), light.glowToCompensate);
-    }
-    return kLightingFogColourAlpha | PackedChannel(colour[0], 16) | PackedChannel(colour[1], 8) |
-           PackedChannel(colour[2], 0);
+    return PackedFogColour(scattered, opacity, linear, light);
+}
+
+float Distance3(const float* a, const float* b)
+{
+    const float d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+    return std::sqrt(Dot3(d, d));
 }
 }
 
@@ -540,7 +596,7 @@ StockFogFit FitStockFog(const FogParams& drawn, const FrameInputs& in, const Sto
     const int rayCount = BuildFitRays(in, rays);
     if (rayCount == 0)
         return {};
-    const FitPointLights points = UploadedPointLights(in, light);
+    const FitPointLights points = UploadedPointLights(fog, in, light);
     RaySamples samples[kFitRays];
     float stepDepth = kStockFogFitDepth / kFitDepthSteps;
     IntegrateRays(fog, points, rays, rayCount, in, stepDepth, samples);
@@ -562,12 +618,91 @@ StockFogFit FitStockFog(const FogParams& drawn, const FrameInputs& in, const Sto
     fit.start = static_cast<float>((1.0 - intercept) / slope);
     fit.end = static_cast<float>(-intercept / slope);
     fit.colour = FittedFogColour(rays, samples, rayCount, fog.linear, light);
+    fit.scene = {true, fog, in, light};
     return fit;
+}
+
+bool PlacementMatchesCamera(const float* world, float cameraDistanceSquared, const float* camPos)
+{
+    const float distance = Distance3(world, camPos);
+    const float squared = distance * distance;
+    return std::isfinite(squared) && std::isfinite(cameraDistanceSquared) &&
+           std::fabs(squared - cameraDistanceSquared) <=
+               std::max(kObjectPlacementMinTolerance, kObjectPlacementTolerance * squared);
+}
+
+bool FitObjectFog(const StockFogFit& fit, const float* world, ObjectFog& out)
+{
+    out = {};
+    const ObjectFogScene& scene = fit.scene;
+    if (!fit.fogs || !scene.valid)
+        return false;
+    float relative[3];
+    for (int axis = 0; axis < 3; ++axis)
+        relative[axis] = world[axis] - scene.in.camPos[axis];
+    float view[3];
+    TransformDirection(relative, scene.in.cameraRelativeView, view);
+    const float distance = std::sqrt(Dot3(relative, relative));
+    if (!(view[2] >= kObjectFogMinViewDepth) || !std::isfinite(distance))
+        return false;
+    FitRay ray = {};
+    for (int axis = 0; axis < 3; ++axis)
+        ray.world[axis] = relative[axis] / distance;
+    ray.distancePerViewDepth = distance / view[2];
+    ray.weight = 1.0f;
+    const FitPointLights points = UploadedPointLights(scene.fog, scene.in, scene.light);
+    DepthSample samples[kFitDepthSteps + 1];
+    IntegrateRay(scene.fog, points, ray, scene.in, view[2] / kFitDepthSteps, kFitDepthSteps, samples);
+    const DepthSample& atObject = samples[kFitDepthSteps];
+    out.viewDepth = view[2];
+    out.transmittance = atObject.transmittance;
+    const float opacity = 1.0f - atObject.transmittance;
+    if (opacity <= kMinFogOpacity)
+        return true;
+    const double scattered[3] = {atObject.inScatter[0], atObject.inScatter[1], atObject.inScatter[2]};
+    for (int c = 0; c < 3; ++c)
+        out.scatterPerOpacity[c] = atObject.inScatter[c] / opacity;
+    const GammaBlend blend = scene.fog.linear
+                                 ? GammaBlendOfLinearFog(atObject, scene.light)
+                                 : GammaBlend{opacity, PackedFogColour(scattered, opacity, false, scene.light)};
+    out.fogs = blend.opacity > kMinFogOpacity;
+    out.start = 0.0f;
+    out.end = view[2] / std::max(blend.opacity, kMinFogOpacity);
+    out.colour = blend.colour;
+    out.displayOpacity = blend.opacity;
+    return true;
+}
+
+void ApplyObjectFog(const ObjectFog& fog, M2BatchFogArgs& args)
+{
+    args.exponent = kLinearStockFogExponent;
+    if (!fog.fogs)
+    {
+        args.start = kUnfoggedObjectStart;
+        args.end = kUnfoggedObjectStart * 2.0f;
+        return;
+    }
+    args.start = fog.start;
+    args.end = fog.end;
+    if (args.colour && UsesLightingFogColour(*args.colour))
+        args.colour = &fog.colour;
 }
 
 bool UsesLightingFogColour(uint32_t colour)
 {
     return (colour & kFogColourAlphaMask) == kLightingFogColourAlpha;
+}
+
+bool UnfoggedBatchFogColour(uint16_t blendMode, uint32_t& colour)
+{
+    constexpr uint32_t kBlendModeFogColours[kM2BlendModes] = {
+        kLightingFogColourAlpha, kLightingFogColourAlpha, kLightingFogColourAlpha, kAdditiveFogColour,
+        kAdditiveFogColour,      kModulateFogColour,      kModulate2xFogColour,    kAdditiveFogColour,
+    };
+    if (blendMode >= kM2BlendModes)
+        return false;
+    colour = kBlendModeFogColours[blendMode];
+    return true;
 }
 
 void ApplyStockFogFit(const StockFogFit& fit, M2BatchFogArgs& args)

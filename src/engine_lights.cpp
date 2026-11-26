@@ -364,25 +364,122 @@ LocalLightCapture CapturePointLightTableGuarded(uintptr_t sceneSlot, const Local
 bool CandidateInputsValid(const LocalLightInputs& out, const LocalPointLight& light, const float cameraPosition[3],
                           const PointLightUpload& upload)
 {
-    return out.pointLightCount <= kMaxLocalPointLights && out.candidateCount <= kLocalLightCandidatePool &&
+    return out.pointLightCount <= kMaxLocalPointLights && out.candidateCount <= kLocalLightCapturePool &&
            ValidVector(cameraPosition, -kMaxWorldCoordinate, kMaxWorldCoordinate) &&
            ValidVector(light.position, -kMaxWorldCoordinate, kMaxWorldCoordinate) &&
            ValidVector(light.color, 0.0f, kMaxLightComponent) && std::isfinite(upload.intensity) &&
-           upload.intensity >= 0.0f;
+           upload.intensity >= 0.0f && std::isfinite(upload.reach) && upload.reach >= 0.0f;
 }
 
 bool BoundCandidate(const LocalPointLight& light, const PointLightUpload& upload, LocalPointLight& candidate)
 {
     candidate = light;
     engine::UploadedPointLightColor(candidate.color, upload, candidate.uploadedColor);
-    candidate.cutoff = engine::PointLightCutoff(candidate.uploadedColor, candidate.attenuation);
+    candidate.cutoff = engine::PointLightCutoff(candidate.uploadedColor, candidate.attenuation, upload.reach);
     return candidate.cutoff > 0.0f;
 }
 
 bool RankCandidate(LocalLightInputs& out, const LocalPointLight& candidate, const float cameraPosition[3])
 {
-    InsertRankedLight(out.candidates, out.candidateCount, kLocalLightCandidatePool, candidate, cameraPosition);
+    InsertRankedLight(out.candidates, out.candidateCount, kLocalLightCapturePool, candidate, cameraPosition);
     return InsertRankedLight(out.pointLights, out.pointLightCount, kMaxLocalPointLights, candidate, cameraPosition);
+}
+
+bool CoefficientsAgree(float a, float b)
+{
+    return std::fabs(a - b) <= kTwinAttenuationTolerance * std::max(std::fabs(a), std::fabs(b));
+}
+
+bool ChromaAgrees(const LocalPointLight& a, const LocalPointLight& b)
+{
+    const float aPeak = PeakColor(a.color);
+    const float bPeak = PeakColor(b.color);
+    if (!(aPeak > 0.0f) || !(bPeak > 0.0f))
+        return false;
+    for (int i = 0; i < 3; ++i)
+        if (std::fabs(a.color[i] / aPeak - b.color[i] / bPeak) > kTwinChromaTolerance)
+            return false;
+    return true;
+}
+
+bool TwinLights(const LocalPointLight& a, const LocalPointLight& b)
+{
+    if (SquaredDistance(a.position, b.position) > double{kTwinPointLightYards} * kTwinPointLightYards)
+        return false;
+    for (int i = 0; i < 3; ++i)
+        if (!CoefficientsAgree(a.attenuation[i], b.attenuation[i]))
+            return false;
+    return ChromaAgrees(a, b);
+}
+
+uint32_t TwinRoot(uint32_t* parents, uint32_t index)
+{
+    while (parents[index] != index)
+        index = parents[index] = parents[parents[index]];
+    return index;
+}
+
+bool SpanFits(const LocalPointLight* lights, const uint32_t* roots, uint32_t count, uint32_t root)
+{
+    const double span = double{kTwinPointLightSpanYards} * kTwinPointLightSpanYards;
+    for (uint32_t i = 0; i < count; ++i)
+        for (uint32_t j = i + 1; j < count; ++j)
+            if (roots[i] == root && roots[j] == root && SquaredDistance(lights[i].position, lights[j].position) > span)
+                return false;
+    return true;
+}
+
+LocalPointLight MergedTwins(const LocalPointLight* lights, const uint32_t* roots, uint32_t count, uint32_t root,
+                            float reach)
+{
+    LocalPointLight merged = lights[root];
+    double weightSum = 0.0;
+    double position[3] = {};
+    double attenuation[3] = {};
+    float uploaded[3] = {};
+    float memberCutoff = 0.0f;
+    uint32_t mergedLights = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        if (roots[i] != root)
+            continue;
+        const LocalPointLight& member = lights[i];
+        const double weight = PeakColor(member.uploadedColor);
+        weightSum += weight;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            position[axis] += weight * member.position[axis];
+            attenuation[axis] += weight * member.attenuation[axis];
+            uploaded[axis] += member.uploadedColor[axis];
+        }
+        mergedLights += member.mergedLights;
+        memberCutoff = std::max(memberCutoff, member.cutoff);
+        if (member.nativeId < merged.nativeId)
+        {
+            std::memcpy(merged.color, member.color, sizeof(merged.color));
+            merged.enabled = member.enabled;
+            merged.nativeId = member.nativeId;
+        }
+    }
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        merged.position[axis] = static_cast<float>(position[axis] / weightSum);
+        merged.attenuation[axis] = static_cast<float>(attenuation[axis] / weightSum);
+        merged.uploadedColor[axis] = uploaded[axis];
+    }
+    merged.mergedLights = mergedLights;
+    merged.cutoff =
+        std::max(engine::PointLightCutoff(merged.uploadedColor, merged.attenuation, reach), memberCutoff);
+    return merged;
+}
+
+void RerankMergedPool(LocalLightInputs& lights, const LocalPointLight* pool, uint32_t count,
+                      const float cameraPosition[3])
+{
+    lights.candidateCount = 0;
+    lights.pointLightCount = 0;
+    for (uint32_t i = 0; i < count; ++i)
+        RankCandidate(lights, pool[i], cameraPosition);
 }
 }
 
@@ -416,12 +513,12 @@ void UploadedPointLightColor(const float captured[3], const PointLightUpload& up
                                            : std::max(captured[channel], 0.0f)) * upload.intensity;
 }
 
-float PointLightCutoff(const float color[3], const float attenuation[3])
+float PointLightCutoff(const float color[3], const float attenuation[3], float reach)
 {
     if (!ValidVector(color, 0.0f, kMaxUploadedLightComponent) ||
-        !ValidVector(attenuation, 0.0f, kMaxAttenuationCoefficient))
+        !ValidVector(attenuation, 0.0f, kMaxAttenuationCoefficient) || !std::isfinite(reach) || reach < 0.0f)
         return 0.0f;
-    const double peak = PeakColor(color);
+    const double peak = PeakColor(color) * reach;
     const double target = peak / kLocalPointLightContributionCutoff;
     if (peak <= 0.0 || target <= std::max(static_cast<double>(attenuation[0]), 1.0))
         return 0.0f;
@@ -460,6 +557,50 @@ bool SelectLocalPointLightInView(LocalLightInputs& out, const LocalPointLight& l
     LocalPointLight candidate;
     return CandidateInputsValid(out, light, camera.position, upload) && BoundCandidate(light, upload, candidate) &&
            PointLightMeetsView(candidate, camera) && RankCandidate(out, candidate, camera.position);
+}
+
+uint32_t MergeTwinPointLights(LocalLightInputs& lights, const float cameraPosition[3], float reach)
+{
+    const uint32_t count = std::min(lights.candidateCount, kLocalLightCapturePool);
+    uint32_t parents[kLocalLightCapturePool];
+    for (uint32_t i = 0; i < count; ++i)
+        parents[i] = i;
+    bool twins = false;
+    for (uint32_t i = 0; i < count; ++i)
+        for (uint32_t j = i + 1; j < count; ++j)
+            if (TwinLights(lights.candidates[i], lights.candidates[j]))
+            {
+                parents[TwinRoot(parents, j)] = TwinRoot(parents, i);
+                twins = true;
+            }
+    if (!twins)
+        return 0;
+    uint32_t roots[kLocalLightCapturePool];
+    for (uint32_t i = 0; i < count; ++i)
+        roots[i] = TwinRoot(parents, i);
+    LocalPointLight pool[kLocalLightCapturePool];
+    uint32_t pooled = 0;
+    uint32_t absorbed = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const bool clustered = roots[i] != i || std::count(roots, roots + count, i) > 1;
+        if (!clustered || !SpanFits(lights.candidates, roots, count, roots[i]))
+            pool[pooled++] = lights.candidates[i];
+        else if (roots[i] == i)
+            pool[pooled++] = MergedTwins(lights.candidates, roots, count, i, reach);
+        else
+            ++absorbed;
+    }
+    if (!absorbed)
+        return 0;
+    RerankMergedPool(lights, pool, pooled, cameraPosition);
+    lights.mergedTwins += absorbed;
+    return absorbed;
+}
+
+void KeepStrongestCandidates(LocalLightInputs& lights)
+{
+    lights.candidateCount = std::min(lights.candidateCount, kLocalLightCandidatePool);
 }
 
 bool CapturedLightsUsable(LocalLightCapture capture)

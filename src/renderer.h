@@ -1,5 +1,6 @@
 #pragma once
 
+#include "character_on_screen.h"
 #include "config.h"
 #include "engine.h"
 #include "fog_data.h"
@@ -11,6 +12,8 @@
 #include <d3d9.h>
 
 void ForceFogParams(const FogParams* fog);
+void InjectFogPassFault(bool injected);
+void RefuseRaySourceCopy(bool refused);
 
 class Renderer
 {
@@ -28,6 +31,7 @@ public:
     const StockFogFit& LastStockFogFit() const { return m_stockFogFit; }
     const char* LastSkipReason() const { return m_skip; }
     bool AdaptiveLightingHistory() const { return m_adaptiveLightingHistory; }
+    bool HistoryValid() const { return m_historyValid; }
     IDirect3DPixelShader9* DrawnMarch() const { return m_drawnMarch; }
     IDirect3DPixelShader9* DrawnComposite() const { return m_drawnComposite; }
     IDirect3DPixelShader9* DrawnSplitComposite() const { return m_drawnSplitComposite; }
@@ -61,12 +65,14 @@ private:
         float strength = 0.0f;
         float colour[3] = {};
         float glowToCompensate = 0.0f;
+        CharacterOnScreen character = {};
     };
 
     template <typename Passes>
     bool WithClientStateSaved(IDirect3DDevice9* dev, const SceneDepth& depth, Passes passes);
+    bool DrawLateGodRays(IDirect3DDevice9* dev, const SceneDepth& depth);
     void PrepareFullscreenPasses(IDirect3DDevice9* dev);
-    void CopySceneForGodRays(IDirect3DDevice9* dev, IDirect3DSurface9* target, const D3DVIEWPORT9& vp);
+    bool CopySceneForGodRays(IDirect3DDevice9* dev, IDirect3DSurface9* target, const D3DVIEWPORT9& vp);
     void DrawGodRayMask(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, const GodRayFrame& rays);
     bool DrawGodRaysOverScene(IDirect3DDevice9* dev, const SceneDepth& depth, IDirect3DSurface9* target,
                               const D3DSURFACE_DESC& depthDesc, const GodRayFrame& rays);
@@ -117,10 +123,12 @@ private:
     IDirect3DPixelShader9* m_composite[3] = {};
     IDirect3DPixelShader9* m_noisyComposite[3] = {};
     IDirect3DPixelShader9* m_litComposite[3] = {};
+    IDirect3DPixelShader9* m_litNoisyComposite[3] = {};
     IDirect3DPixelShader9* m_silhouetteMask = nullptr;
     IDirect3DPixelShader9* m_splitComposite[3] = {};
     IDirect3DPixelShader9* m_noisySplitComposite[3] = {};
     IDirect3DPixelShader9* m_litSplitComposite[3] = {};
+    IDirect3DPixelShader9* m_litNoisySplitComposite[3] = {};
     bool m_splitCompositesUnavailable = false;
     IDirect3DPixelShader9* m_drawnMarch = nullptr;
     IDirect3DPixelShader9* m_drawnComposite = nullptr;
@@ -128,6 +136,7 @@ private:
     float m_drawnGlowCompensation = 0.0f;
     IDirect3DPixelShader9* m_rayMask = nullptr;
     IDirect3DPixelShader9* m_rayBlur = nullptr;
+    IDirect3DPixelShader9* m_rayShafts = nullptr;
     IDirect3DPixelShader9* m_rayComposite = nullptr;
     IDirect3DPixelShader9* m_probe = nullptr;
     IDirect3DPixelShader9* m_sunShadow = nullptr;
@@ -139,6 +148,8 @@ private:
     IDirect3DTexture9* m_history[2] = {};
     IDirect3DTexture9* m_historyDepth = nullptr;
     IDirect3DTexture9* m_rays[2] = {};
+    IDirect3DTexture9* m_raysOpenWithoutTheCharacter[2] = {};
+    IDirect3DTexture9* m_raySource = nullptr;
     IDirect3DTexture9* m_sceneCopy = nullptr;
     IDirect3DTexture9* m_localLightData = nullptr;
     IDirect3DVolumeTexture9* m_densityNoise = nullptr;
@@ -151,6 +162,7 @@ private:
     PendingDepthProbe m_pendingProbe;
     GpuTimer m_gpuTimer{"fog"};
     StockFogFit m_stockFogFit;
+    bool m_stockFogFitLogDue = false;
     GodRayFrame m_lateGodRays;
     UINT m_lowW = 0;
     UINT m_lowH = 0;
@@ -159,6 +171,7 @@ private:
     UINT m_sceneCopyW = 0;
     UINT m_sceneCopyH = 0;
     bool m_sceneCopyFailed = false;
+    bool m_raySourceCopyFailureLogged = false;
     bool m_probeFailed = false;
 
     int m_historyIndex = 0;

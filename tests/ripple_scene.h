@@ -552,8 +552,7 @@ bool CreateSceneDevice(Harness& h, const wchar_t* windowClass)
     h.pp.AutoDepthStencilFormat = kClientDepthFormat;
     h.pp.hDeviceWindow = h.window;
     h.pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
-    const DWORD flags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
-    if (FAILED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, flags, &h.pp, &h.dev)) || !h.dev)
+    if (FAILED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, kClientDeviceFlags, &h.pp, &h.dev)) || !h.dev)
         return false;
     h.CreateEngineObjects();
     return true;

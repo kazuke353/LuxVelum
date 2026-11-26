@@ -10,8 +10,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 file(GLOB FXC_CANDIDATES "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/10.*/x86/fxc.exe")
-list(SORT FXC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
-list(GET FXC_CANDIDATES 0 FXC_DEFAULT)
+if(FXC_CANDIDATES)
+    list(SORT FXC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+    list(GET FXC_CANDIDATES 0 FXC_DEFAULT)
+endif()
 set(FXC "${FXC_DEFAULT}" CACHE FILEPATH "HLSL compiler (fxc.exe)")
 if(NOT EXISTS "${FXC}")
     message(FATAL_ERROR "fxc.exe not found; install the Windows SDK or set -DFXC=<path>")
@@ -21,13 +23,13 @@ set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set(SHADER_OUT ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SHADER_OUT})
 
-set(VF_INCLUDES ${SHADER_DIR}/vf_common.hlsli ${SHADER_DIR}/vf_integrate.hlsli
+set(VF_INCLUDES ${SHADER_DIR}/vf_pixel_noise.hlsli ${SHADER_DIR}/vf_common.hlsli ${SHADER_DIR}/vf_integrate.hlsli
                 ${SHADER_DIR}/vf_local_lights.hlsli ${SHADER_DIR}/vf_density_variation.hlsli
                 ${SHADER_DIR}/vf_authored_noise.hlsli ${SHADER_DIR}/vf_composite.hlsli
                 ${SHADER_DIR}/vf_sample_split.hlsli)
 set(VW_FFT_INCLUDES ${SHADER_DIR}/vw_fft_common.hlsli)
-set(VW_INCLUDES ${SHADER_DIR}/vf_common.hlsli ${SHADER_DIR}/vw_constants.hlsli ${SHADER_DIR}/vw_surface.hlsli
-                ${SHADER_DIR}/vw_optics.hlsli ${SHADER_DIR}/vw_reflection.hlsli)
+set(VW_INCLUDES ${SHADER_DIR}/vf_pixel_noise.hlsli ${SHADER_DIR}/vf_common.hlsli ${SHADER_DIR}/vw_constants.hlsli
+                ${SHADER_DIR}/vw_surface.hlsli ${SHADER_DIR}/vw_optics.hlsli ${SHADER_DIR}/vw_reflection.hlsli)
 
 set(SHADER_HEADERS)
 function(vf_shader name source profile)
@@ -69,27 +71,43 @@ vf_shader(ps_history_depth vf_history_depth.hlsl ps_3_0)
 vf_shader(ps_composite_low vf_composite.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=0)
 vf_shader(ps_composite_mid vf_composite.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=0)
 vf_shader(ps_composite_high vf_composite.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=0)
-vf_shader(ps_noisy_composite_low vf_composite.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=0 /DSAMPLES_AUTHORED_NOISE=1)
-vf_shader(ps_noisy_composite_mid vf_composite.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=0 /DSAMPLES_AUTHORED_NOISE=1)
-vf_shader(ps_noisy_composite_high vf_composite.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=0 /DSAMPLES_AUTHORED_NOISE=1)
+vf_shader(ps_noisy_composite_low vf_composite.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=0 /DSAMPLES_AUTHORED_NOISE=1
+          /DUNROLLS_LAYERS=0)
+vf_shader(ps_noisy_composite_mid vf_composite.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=0 /DSAMPLES_AUTHORED_NOISE=1
+          /DUNROLLS_LAYERS=0)
+vf_shader(ps_noisy_composite_high vf_composite.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=0 /DSAMPLES_AUTHORED_NOISE=1
+          /DUNROLLS_LAYERS=0)
 vf_shader(ps_lit_composite_low vf_composite.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=1)
 vf_shader(ps_lit_composite_mid vf_composite.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=1)
 vf_shader(ps_lit_composite_high vf_composite.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=1)
+vf_shader(ps_lit_noisy_composite_low vf_composite.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=1 /DSAMPLES_AUTHORED_NOISE=1
+          /DVARIES_DENSITY=0)
+vf_shader(ps_lit_noisy_composite_mid vf_composite.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=1 /DSAMPLES_AUTHORED_NOISE=1
+          /DVARIES_DENSITY=0)
+vf_shader(ps_lit_noisy_composite_high vf_composite.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=1 /DSAMPLES_AUTHORED_NOISE=1
+          /DVARIES_DENSITY=0)
 vf_shader(ps_split_composite_low vf_composite_split.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=0)
 vf_shader(ps_split_composite_mid vf_composite_split.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=0)
 vf_shader(ps_split_composite_high vf_composite_split.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=0)
 vf_shader(ps_noisy_split_composite_low vf_composite_split.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=0
-          /DSAMPLES_AUTHORED_NOISE=1)
+          /DSAMPLES_AUTHORED_NOISE=1 /DUNROLLS_LAYERS=0)
 vf_shader(ps_noisy_split_composite_mid vf_composite_split.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=0
-          /DSAMPLES_AUTHORED_NOISE=1)
+          /DSAMPLES_AUTHORED_NOISE=1 /DUNROLLS_LAYERS=0)
 vf_shader(ps_noisy_split_composite_high vf_composite_split.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=0
-          /DSAMPLES_AUTHORED_NOISE=1)
+          /DSAMPLES_AUTHORED_NOISE=1 /DUNROLLS_LAYERS=0)
 vf_shader(ps_lit_split_composite_low vf_composite_split.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=1)
 vf_shader(ps_lit_split_composite_mid vf_composite_split.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=1)
 vf_shader(ps_lit_split_composite_high vf_composite_split.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=1)
+vf_shader(ps_lit_noisy_split_composite_low vf_composite_split.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=1
+          /DSAMPLES_AUTHORED_NOISE=1 /DVARIES_DENSITY=0)
+vf_shader(ps_lit_noisy_split_composite_mid vf_composite_split.hlsl ps_3_0 /DSTEPS=24 /DLOCAL_LIGHTS=1
+          /DSAMPLES_AUTHORED_NOISE=1 /DVARIES_DENSITY=0)
+vf_shader(ps_lit_noisy_split_composite_high vf_composite_split.hlsl ps_3_0 /DSTEPS=32 /DLOCAL_LIGHTS=1
+          /DSAMPLES_AUTHORED_NOISE=1 /DVARIES_DENSITY=0)
 vf_shader(ps_silhouette_mask vf_silhouette_mask.hlsl ps_3_0 /DLOCAL_LIGHTS=0)
 vf_shader(ps_ray_mask vf_ray_mask.hlsl ps_3_0)
 vf_shader(ps_ray_blur vf_ray_blur.hlsl ps_3_0)
+vf_shader(ps_ray_shafts vf_ray_shafts.hlsl ps_3_0)
 vf_shader(ps_ray_composite vf_ray_composite.hlsl ps_3_0 /DSTEPS=16 /DLOCAL_LIGHTS=0)
 vf_shader(ps_probe vf_probe.hlsl ps_3_0)
 vf_shader(ps_depth_check vf_depth_check.hlsl ps_3_0)
@@ -123,24 +141,41 @@ target_compile_definitions(imgui
     PRIVATE IMGUI_IMPL_WIN32_DISABLE_GAMEPAD IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS
             IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS WIN32_LEAN_AND_MEAN NOMINMAX)
 
-add_library(LuxVelum SHARED
+include(cmake/BuildId.cmake)
+luxvelum_build_id(LUXVELUM_BUILD_ID)
+luxvelum_version(LUXVELUM_VERSION)
+set(BUILD_ID_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+configure_file(cmake/build_id.h.in ${BUILD_ID_DIR}/build_id.h @ONLY)
+message(STATUS "Luxvelum ${LUXVELUM_VERSION}, build id: ${LUXVELUM_BUILD_ID}")
+
+add_library(Luxvelum SHARED
+    src/celestial_occlusion.cpp
+    src/character_on_screen.cpp
+    src/client_camera_focus.cpp
     src/client_code.cpp
     src/client_light_stay.cpp
+    src/client_map.cpp
     src/client_ripple_sprites.cpp
     src/config.cpp
     src/d3d9_wrap.cpp
     src/dllmain.cpp
+    src/dxvk_vendor.cpp
     src/engine.cpp
     src/engine_actors.cpp
     src/engine_lights.cpp
+    src/client_light_bands.cpp
     src/fog_data.cpp
+    src/fog_data_choice.cpp
     src/fog_model.cpp
     src/forever_look.cpp
     src/gpu_timing.cpp
     src/grading_renderer.cpp
     src/hooks.cpp
+    src/install_paths.cpp
+    src/light_on_screen.cpp
     src/local_light_stabiliser.cpp
     src/log.cpp
+    src/luxvelum_switch.cpp
     src/msaa_depth.cpp
     src/noise_volume.cpp
     src/overlay.cpp
@@ -154,48 +189,58 @@ add_library(LuxVelum SHARED
     src/water_renderer.cpp
     src/water_ripples.cpp
     src/water_spectrum.cpp
-    src/LuxVelum.def)
-add_dependencies(LuxVelum vf_shaders)
-target_include_directories(LuxVelum PRIVATE src ${SHADER_OUT})
-target_compile_definitions(LuxVelum PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_compile_options(LuxVelum PRIVATE /W4 /wd4100 /arch:SSE2 /fp:fast /GS)
-target_link_libraries(LuxVelum PRIVATE kernel32 user32 imgui)
+    src/zone_halo.cpp
+    src/Luxvelum.def)
+add_dependencies(Luxvelum vf_shaders)
+target_include_directories(Luxvelum PRIVATE src ${SHADER_OUT} ${BUILD_ID_DIR})
+target_compile_definitions(Luxvelum PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_compile_options(Luxvelum PRIVATE /W4 /wd4100 /arch:SSE2 /fp:fast /GS)
+target_link_libraries(Luxvelum PRIVATE kernel32 user32 imgui)
 
 add_library(version SHARED proxy/version_proxy.cpp proxy/version.def)
-target_link_libraries(version PRIVATE LuxVelum)
+target_link_libraries(version PRIVATE Luxvelum)
 target_compile_definitions(version PRIVATE WIN32_LEAN_AND_MEAN)
 
-add_executable(vfog_harness tests/harness.cpp src/client_code.cpp src/client_light_stay.cpp
-               src/client_ripple_sprites.cpp src/config.cpp src/engine_actors.cpp
-               src/engine_lights.cpp src/local_light_stabiliser.cpp
-               src/fog_data.cpp src/fog_model.cpp src/gpu_timing.cpp src/log.cpp src/noise_volume.cpp
-               src/transparent_fog.cpp src/water_contacts.cpp src/water_data.cpp src/water_spectrum.cpp
-               src/water_fft.cpp src/water_ripples.cpp src/status_log.cpp)
-target_include_directories(vfog_harness PRIVATE src ${SHADER_OUT})
+add_executable(vfog_harness tests/harness.cpp src/celestial_occlusion.cpp src/character_on_screen.cpp
+               src/client_camera_focus.cpp src/client_code.cpp src/client_light_stay.cpp src/client_map.cpp
+               src/client_ripple_sprites.cpp src/config.cpp src/engine_actors.cpp src/engine_lights.cpp
+               src/light_on_screen.cpp src/local_light_stabiliser.cpp src/fog_data.cpp src/fog_model.cpp
+               src/gpu_timing.cpp src/install_paths.cpp src/log.cpp src/noise_volume.cpp src/transparent_fog.cpp
+               src/water_contacts.cpp src/water_data.cpp src/water_spectrum.cpp src/water_fft.cpp
+               src/water_ripples.cpp src/status_log.cpp src/zone_halo.cpp src/client_light_bands.cpp
+               src/fog_data_choice.cpp src/dxvk_vendor.cpp)
+target_include_directories(vfog_harness PRIVATE src ${SHADER_OUT} ${BUILD_ID_DIR})
 target_compile_definitions(vfog_harness PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(vfog_harness PRIVATE LuxVelum user32 ole32 windowscodecs)
-add_dependencies(vfog_harness version)
-add_custom_command(TARGET LuxVelum POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/LuxVelum.ini
-            ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin ${CMAKE_CURRENT_SOURCE_DIR}/data/waterdata.bin
-            $<TARGET_FILE_DIR:LuxVelum>)
+target_link_libraries(vfog_harness PRIVATE Luxvelum user32 ole32 windowscodecs)
+add_custom_target(luxvelum_runtime_files ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Luxvelum>/WTF $<TARGET_FILE_DIR:Luxvelum>/Data/Luxvelum
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/Luxvelum.ini
+            $<TARGET_FILE_DIR:Luxvelum>/WTF
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata-without-darker-nights.bin
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/waterdata.bin ${CMAKE_CURRENT_SOURCE_DIR}/data/zones.ini
+            $<TARGET_FILE_DIR:Luxvelum>/Data/Luxvelum
+    COMMENT "Copying Luxvelum.ini into WTF and the fog, water and zone data into Data/Luxvelum beside Luxvelum.dll"
+    VERBATIM)
+add_dependencies(Luxvelum luxvelum_runtime_files)
+add_dependencies(vfog_harness luxvelum_runtime_files version)
 
 enable_testing()
-configure_file(LuxVelum.ini interior-test.ini COPYONLY)
 add_test(NAME interior_fog
-    COMMAND vfog_harness --scene interior --ini ${CMAKE_CURRENT_BINARY_DIR}/interior-test.ini
+    COMMAND vfog_harness --scene interior --out ${CMAKE_CURRENT_BINARY_DIR}/interior-out
+            --ini ${CMAKE_CURRENT_SOURCE_DIR}/Luxvelum.ini
     WORKING_DIRECTORY $<TARGET_FILE_DIR:vfog_harness>)
 add_test(NAME vfog_harness
     COMMAND vfog_harness --out ${CMAKE_CURRENT_BINARY_DIR}/harness-out
             --data ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin
-            --ini ${CMAKE_CURRENT_SOURCE_DIR}/LuxVelum.ini
+            --ini ${CMAKE_CURRENT_SOURCE_DIR}/Luxvelum.ini
             --water-data ${CMAKE_CURRENT_SOURCE_DIR}/data/waterdata.bin
     WORKING_DIRECTORY $<TARGET_FILE_DIR:vfog_harness>)
 set_tests_properties(vfog_harness PROPERTIES LABELS gpu)
 add_test(NAME cpu_harness
     COMMAND vfog_harness --scene cpu --out ${CMAKE_CURRENT_BINARY_DIR}/cpu-harness-out
             --data ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin
-            --ini ${CMAKE_CURRENT_SOURCE_DIR}/LuxVelum.ini
+            --ini ${CMAKE_CURRENT_SOURCE_DIR}/Luxvelum.ini
             --water-data ${CMAKE_CURRENT_SOURCE_DIR}/data/waterdata.bin
     WORKING_DIRECTORY $<TARGET_FILE_DIR:vfog_harness>)
 set_tests_properties(cpu_harness PROPERTIES LABELS cpu)

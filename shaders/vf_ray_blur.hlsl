@@ -2,6 +2,7 @@ float4 cRadialBlur : register(c9);
 float4 cRayTarget : register(c10);
 
 sampler2D sSource : register(s0);
+sampler2D sOpenWithoutTheCharacter : register(s1);
 
 static const int kTaps = 8;
 static const float kDecayPerTap = 0.9;
@@ -26,16 +27,28 @@ float2 TargetTexelSize()
     return cRayTarget.zw;
 }
 
-float4 main(float2 texel : VPOS) : COLOR0
+struct BlurredRays
+{
+    float4 rays : COLOR0;
+    float4 openWithoutTheCharacter : COLOR1;
+};
+
+BlurredRays main(float2 texel : VPOS)
 {
     float2 uv = (texel + 0.5) * TargetTexelSize();
     float2 tapStep = (SunUv() - uv) * StepFractionTowardSun();
-    float3 sum = 0;
+    float4 sum = 0;
+    float openWithoutTheCharacter = 0;
     float tapWeight = 1;
     [unroll] for (int k = 0; k < kTaps; k++)
     {
-        sum += tex2Dlod(sSource, float4(uv + tapStep * k, 0, 0)).rgb * tapWeight;
+        float4 tapUv = float4(uv + tapStep * k, 0, 0);
+        sum += tex2Dlod(sSource, tapUv) * tapWeight;
+        openWithoutTheCharacter += tex2Dlod(sOpenWithoutTheCharacter, tapUv).a * tapWeight;
         tapWeight *= kDecayPerTap;
     }
-    return float4(sum * TapWeightNormalisation(), 1);
+    BlurredRays blurred;
+    blurred.rays = sum * TapWeightNormalisation();
+    blurred.openWithoutTheCharacter = openWithoutTheCharacter * TapWeightNormalisation();
+    return blurred;
 }

@@ -1,13 +1,24 @@
+#include "build_id.h"
+#include "character_on_screen.h"
+#include "client_camera_focus.h"
 #include "client_light_stay.h"
+#include "client_light_bands.h"
+#include "client_map.h"
 #include "client_ripple_sprites.h"
 #include "config.h"
+#include "dxvk_vendor.h"
 #include "engine.h"
 #include "fog_data.h"
+#include "fog_data_choice.h"
+#include "game_window_log.h"
 #include "fog_model.h"
 #include "forever_look.h"
 #include "fullscreen_triangle.h"
 #include "gpu_timing.h"
 #include "grading_renderer.h"
+#include "hooks.h"
+#include "install_paths.h"
+#include "light_on_screen.h"
 #include "local_light_stabiliser.h"
 #include "log.h"
 #include "msaa_depth.h"
@@ -17,11 +28,13 @@
 #include "water_fft.h"
 #include "water_ripples.h"
 #include "water_spectrum.h"
+#include "water_glint.h"
 #include "status_log.h"
 #include "transparent_fog.h"
 
 #include <windows.h>
 #include <d3d9.h>
+#include <share.h>
 #include <wincodec.h>
 
 #include <algorithm>
@@ -30,12 +43,15 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 extern "C" __declspec(dllimport) IDirect3D9* __cdecl vf_test_wrap_direct3d9(IDirect3D9*(WINAPI*)(UINT), UINT);
+extern "C" __declspec(dllimport) int __cdecl vf_test_get_proc_address_slot_holds(uintptr_t);
 extern "C" __declspec(dllimport) void __cdecl vf_test_set_config(const Config*);
 extern "C" __declspec(dllimport) void __cdecl vf_test_get_config(Config*);
 extern "C" __declspec(dllimport) int __cdecl vf_test_render(const FrameInputs*, const char**);
@@ -46,6 +62,10 @@ extern "C" __declspec(dllimport) void __cdecl vf_test_drawn_fog_shaders(IDirect3
 extern "C" __declspec(dllimport) void __cdecl vf_test_force_depth_write(int);
 extern "C" __declspec(dllimport) void __cdecl vf_test_suppress_depth_write(int);
 extern "C" __declspec(dllimport) int __cdecl vf_test_overlay_visible();
+extern "C" __declspec(dllimport) void __cdecl vf_test_flip_luxvelum_switch();
+extern "C" __declspec(dllimport) int __cdecl vf_test_latch_luxvelum_switch();
+extern "C" __declspec(dllimport) int __cdecl vf_test_luxvelum_switched_off(int*);
+extern "C" __declspec(dllimport) int __cdecl vf_test_fog_status(const char**);
 extern "C" __declspec(dllimport) void __cdecl vf_test_draw_overlay();
 extern "C" __declspec(dllimport) int __cdecl vf_test_settings_window(float*);
 extern "C" __declspec(dllimport) int __cdecl vf_test_assign_water_data(const WaterPreset*, int,
@@ -83,7 +103,9 @@ extern "C" __declspec(dllimport) void __cdecl vf_test_hook_frame_begin();
 extern "C" __declspec(dllimport) void __cdecl vf_test_hook_liquid_end();
 extern "C" __declspec(dllimport) void __cdecl vf_test_hook_world_done();
 extern "C" __declspec(dllimport) void __cdecl vf_test_hook_m2_batch_fog(M2BatchFogArgs*);
+extern "C" __declspec(dllimport) int __cdecl vf_test_read_m2_model_placement(const void*, engine::M2ModelPlacement*);
 extern "C" __declspec(dllimport) const void* __cdecl vf_test_m2_batch_fog_thunk(uintptr_t);
+extern "C" __declspec(dllimport) const void* __cdecl vf_test_m2_unfogged_batch_thunk(uintptr_t);
 extern "C" __declspec(dllimport) const void* __cdecl vf_test_glare_pass_thunk(uintptr_t);
 extern "C" __declspec(dllimport) const void* __cdecl vf_test_world_text_draw_thunk(uintptr_t);
 extern "C" __declspec(dllimport) void __cdecl vf_test_log_transparent_fog_stats();
@@ -97,6 +119,10 @@ extern "C" __declspec(dllimport) void __cdecl vf_test_force_depth_copy_method(in
 extern "C" __declspec(dllimport) int __cdecl vf_test_read_scene_depth(const DepthTexel*, int, float*);
 extern "C" __declspec(dllimport) void __cdecl vf_test_multisampling(MultisamplingStatus*);
 extern "C" __declspec(dllimport) void __cdecl vf_test_probe_depth_copy(IDirect3D9*, DepthCopyProbe*);
+extern "C" __declspec(dllimport) D3DFORMAT __cdecl vf_test_display_format_for(D3DFORMAT);
+extern "C" __declspec(dllimport) void __cdecl vf_test_fail_depth_creation(int);
+extern "C" __declspec(dllimport) const char* __cdecl vf_test_load_nvapi(LibraryLoader);
+extern "C" __declspec(dllimport) const char* __cdecl vf_test_log_path();
 extern "C" __declspec(dllimport) void __cdecl vf_test_water_ripple_stats(WaterRippleStats*);
 extern "C" __declspec(dllimport) void __cdecl vf_test_water_ripple_shading(WaterRippleShading*);
 extern "C" __declspec(dllimport) unsigned __cdecl vf_test_water_contact_reads();
@@ -109,6 +135,7 @@ extern "C" __declspec(dllimport) void __cdecl vf_test_use_forever_look_frame(con
 extern "C" __declspec(dllimport) void __cdecl vf_test_forever_look_world_done();
 extern "C" __declspec(dllimport) int __cdecl vf_test_delivered_glow(float*);
 extern "C" __declspec(dllimport) void __cdecl vf_test_grading_stats(GradingStats*);
+extern "C" __declspec(dllimport) void __cdecl vf_test_fail_grading_scene_copies(int);
 extern "C" __declspec(dllimport) int __cdecl vf_test_forever_look_guards(engine::CodeRange*, int);
 extern "C" __declspec(dllimport) void __cdecl vf_test_forever_look_status(ForeverLookStatus*);
 extern "C" __declspec(dllimport) void __cdecl vf_test_use_world_hook_client(const FrameInputs*, int);
@@ -116,11 +143,19 @@ extern "C" __declspec(dllimport) void __cdecl vf_test_hook_opaque_done();
 extern "C" __declspec(dllimport) void __cdecl vf_test_hook_world_done();
 extern "C" __declspec(dllimport) void __cdecl vf_test_simulate_fog_hook_failure(int);
 extern "C" __declspec(dllimport) float __cdecl vf_test_drawn_glow_compensation();
+extern "C" __declspec(dllimport) void __cdecl vf_test_fail_fog_pass(int);
+extern "C" __declspec(dllimport) void __cdecl vf_test_fail_grading_pass(int);
+extern "C" __declspec(dllimport) int __cdecl vf_test_fog_history_valid();
+extern "C" __declspec(dllimport) void __cdecl vf_test_fail_ray_source_copy(int);
 
 namespace
 {
 constexpr D3DFORMAT kIntz = static_cast<D3DFORMAT>(MAKEFOURCC('I', 'N', 'T', 'Z'));
 constexpr D3DFORMAT kClientDepthFormat = D3DFMT_D24X8;
+constexpr DWORD kClientDeviceFlags =
+    D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
+static_assert(kClientDeviceFlags == 0x52, "the harness creates its devices with the client's flags 0x52");
+constexpr DWORD kFogDeviceFlags = kClientDeviceFlags & ~static_cast<DWORD>(D3DCREATE_PUREDEVICE);
 constexpr float kPi = 3.14159265f;
 constexpr float kNear = 0.4f;
 constexpr float kFar = 1000.0f;
@@ -134,6 +169,7 @@ constexpr int kReferenceIntegrationSteps = 8192;
 constexpr BYTE kKeyHeld = 0x80;
 constexpr UINT kKeyRepeatCountOne = 1;
 constexpr UINT kKeyReleaseTransition = 0xC0000000u;
+constexpr wchar_t kHotkeyCharacter = L'\x16';
 constexpr int kOverlaySettleFrames = 3;
 constexpr UINT kOverlayProbeLeft = 40;
 constexpr UINT kOverlayProbeTop = 60;
@@ -162,6 +198,8 @@ constexpr int kGripDragY = 24;
 constexpr int kGripShrink = -2000;
 constexpr float kPanelSizeTolerance = 1.5f;
 constexpr float kBesideShrunkPanelGap = 4.0f;
+constexpr UINT kVoidProbeRows = 120;
+constexpr int kMaxVoidMirrorDifference = 3;
 
 int g_failures = 0;
 
@@ -375,7 +413,7 @@ Rgb SampleRgb(const Image& img, int cx, int cy, int radius)
 }
 
 constexpr DWORD kFogPassTextureStages = 11;
-constexpr UINT kFogPassPixelConstants = 100;
+constexpr UINT kFogPassPixelConstants = 103;
 
 struct Sentinel
 {
@@ -635,6 +673,9 @@ FrameInputs MakeInputs(const float* view, const float* proj, Vec3 eye, Vec3 at, 
     in.camTarget[0] = eye.x + f.x * 6;
     in.camTarget[1] = eye.y + f.y * 6;
     in.camTarget[2] = eye.z - 6;
+    in.cameraFocus[0] = eye.x;
+    in.cameraFocus[1] = eye.y;
+    in.cameraFocus[2] = eye.z;
     in.viewport = vp;
     in.dayFraction = 0.75f;
     Vec3 sun = Norm({1.0f, 0.12f, 0.16f});
@@ -675,7 +716,7 @@ float ReferenceUnshadowedSkyTransmittance(const FrameInputs& in, const Config& c
     const float* m = in.cameraRelativeView;
     Vec3 dirW = {v.x * m[0] + v.y * m[1] + v.z * m[2], v.x * m[4] + v.y * m[5] + v.z * m[6],
                  v.x * m[8] + v.y * m[9] + v.z * m[10]};
-    const double upward = std::fmax(dirW.z, 0.0f);
+    const double upward = std::fabs(dirW.z);
     double tau = 0.0;
     for (const FogLayer& layer : fog.layers)
     {
@@ -726,7 +767,17 @@ float WeightOf(const AuthoredFog& fog, uint32_t light)
 constexpr int kEasternKingdoms = 0;
 constexpr int kKalimdor = 1;
 constexpr int kOutland = 530;
+constexpr int kNorthrend = 571;
+constexpr int kMapWithoutClassicLights = 9999;
 const LightParamsSelection kClearWeather = {};
+const float kSomewhere[3] = {};
+const float kNowhereReadable[3] = {0.0f, std::numeric_limits<float>::quiet_NaN(), 0.0f};
+const float kTerokkarBoneWastes[3] = {-3005.0f, 4469.0f, -18.0f};
+const float kHowlingFjordAwayFromItsLights[3] = {1350.0f, -5000.0f, 210.0f};
+const MapPlace kInEasternKingdoms = PlaceOf(kEasternKingdoms, kSomewhere);
+const MapPlace kOnMapWithoutClassicLights = PlaceOf(kMapWithoutClassicLights, kSomewhere);
+const MapPlace kInOutland = PlaceOf(kOutland, kTerokkarBoneWastes);
+const MapPlace kInNorthrend = PlaceOf(kNorthrend, kHowlingFjordAwayFromItsLights);
 constexpr uint32_t kEasternKingdomsGlobalLight = 1;
 constexpr uint32_t kStormwindLight = 77;
 constexpr float kDayFraction1800 = 0.75f;
@@ -762,8 +813,101 @@ void CheckClassicData(const FogData& data)
           "Classic keys interpolated between 18:00 and 19:30");
 
     AuthoredFog none = {};
-    Check(!data.Resolve(kOutland, harbourAtStormwindLightEdge, kDayFraction1800, kClearWeather, none),
+    Check(!data.Resolve(kMapWithoutClassicLights, harbourAtStormwindLightEdge, kDayFraction1800, kClearWeather,
+                        none),
           "maps without Classic lights fall back to derived layers");
+}
+
+AuthoredFog BlendOf(std::initializer_list<std::pair<uint32_t, float>> lights)
+{
+    AuthoredFog fog = {};
+    for (const auto& [id, weight] : lights)
+    {
+        fog.lightIds[fog.lightCount] = id;
+        fog.lightWeights[fog.lightCount] = weight;
+        ++fog.lightCount;
+    }
+    return fog;
+}
+
+void CheckZeroWeightLightsLeaveTheLoggedBlendAlone()
+{
+    const AuthoredFog goldshire = BlendOf({{2, 0.39f}, {15, 0.61f}});
+    const AuthoredFog withGlobalAtZero = BlendOf({{2, 0.39f}, {15, 0.61f}, {kEasternKingdomsGlobalLight, 0.0f}});
+    const AuthoredFog withGlobalBelowRounding =
+        BlendOf({{2, 0.39f}, {15, 0.61f}, {kEasternKingdomsGlobalLight, 0.004f}});
+    const AuthoredFog withGlobalShown = BlendOf({{2, 0.37f}, {15, 0.58f}, {kEasternKingdomsGlobalLight, 0.05f}});
+    Check(BlendSetSignature(goldshire) == BlendSetSignature(withGlobalAtZero) &&
+              BlendSetSignature(goldshire) == BlendSetSignature(withGlobalBelowRounding) &&
+              BlendSetSignature(goldshire) != BlendSetSignature(withGlobalShown),
+          "a light that enters or leaves the blend at a weight the log prints as 0.00 changes no logged light set, "
+          "so Goldshire's border no longer writes a line every frame; a light with weight does");
+}
+
+constexpr uint32_t kFirstClientLight = 1000000;
+constexpr uint32_t kNorthrendGlobalClientLight = kFirstClientLight + 1406;
+
+bool OnlyClientLights(const AuthoredFog& fog)
+{
+    for (int i = 0; i < fog.lightCount; ++i)
+        if (fog.lightIds[i] < kFirstClientLight)
+            return false;
+    return fog.lightCount > 0;
+}
+
+void CheckOutlandAndNorthrendHaveTheirOwnLights(const FogData& data)
+{
+    AuthoredFog outland = {};
+    AuthoredFog northrend = {};
+    const bool outlandFog = data.Resolve(kOutland, kTerokkarBoneWastes, kDayFraction1800, kClearWeather, outland);
+    const bool northrendFog =
+        data.Resolve(kNorthrend, kHowlingFjordAwayFromItsLights, kDayFraction1800, kClearWeather, northrend);
+    std::printf("     Bone Wastes: %d client lights (first %u), coverage %.2f, %d layers; Howling Fjord: light "
+                "%u weight %.2f, %d layers\n",
+                outland.lightCount, outland.lightCount ? outland.lightIds[0] : 0u, outland.coverage,
+                outland.layerCount, northrend.lightCount ? northrend.lightIds[0] : 0u,
+                WeightOf(northrend, kNorthrendGlobalClientLight), northrend.layerCount);
+    Check(outlandFog && OnlyClientLights(outland) && outland.lightCount > 1 &&
+              std::fabs(outland.coverage - 1.0f) < 1e-4f && outland.layerCount > 0,
+          "the Bone Wastes of Terokkar Forest blend their own client lights, converted from the 3.3.5 Light table");
+    Check(northrendFog && OnlyClientLights(northrend) &&
+              std::fabs(WeightOf(northrend, kNorthrendGlobalClientLight) - 1.0f) < 1e-4f && northrend.layerCount > 0,
+          "Northrend's global client light covers Howling Fjord away from its sphere lights");
+}
+
+void CheckRegionalFogSettings()
+{
+    Check(Config().azerothDensity == 1.0f && Config().outlandDensity == 0.15f && Config().northrendDensity == 0.15f,
+          "Outland and Northrend start at density 0.15, as testers found their converted fog too strong");
+    Config cfg = {};
+    cfg.density = 0.8f;
+    cfg.azerothDensity = 1.5f;
+    cfg.outlandDensity = 0.5f;
+    cfg.northrendDensity = 0.25f;
+    const Config azeroth = ConfigForPlace(cfg, kInEasternKingdoms);
+    const Config dungeon = ConfigForPlace(cfg, kOnMapWithoutClassicLights);
+    const Config outland = ConfigForPlace(cfg, kInOutland);
+    const Config northrend = ConfigForPlace(cfg, kInNorthrend);
+    std::printf("     density 0.8 by region: Azeroth %.2f, other map %.2f, Outland %.2f, Northrend %.2f\n",
+                azeroth.density, dungeon.density, outland.density, northrend.density);
+    Check(std::fabs(azeroth.density - 1.2f) < 1e-5f && std::fabs(dungeon.density - 1.2f) < 1e-5f &&
+              std::fabs(outland.density - 0.4f) < 1e-5f && std::fabs(northrend.density - 0.2f) < 1e-5f,
+          "each region scales Density by its own density: Azeroth on every map but Outland and Northrend");
+    Check(outland.dataMode == 1 && northrend.dataMode == 1 && UsesFogData(cfg, kInOutland) &&
+              UsesFogData(cfg, kInNorthrend),
+          "Outland and Northrend borrow the Classic fog by default");
+
+    cfg.outlandClassicFog = 0;
+    Check(ConfigForPlace(cfg, kInOutland).dataMode == 0 && !UsesFogData(cfg, kInOutland) &&
+              ConfigForPlace(cfg, kInNorthrend).dataMode == 1 && ConfigForPlace(cfg, kInEasternKingdoms).dataMode == 1,
+          "OutlandClassicFog=0 gives Outland the derived layers and leaves Northrend and Azeroth alone");
+    cfg.outlandClassicFog = 1;
+    cfg.northrendClassicFog = 0;
+    Check(ConfigForPlace(cfg, kInNorthrend).dataMode == 0 && !UsesFogData(cfg, kInNorthrend) &&
+              ConfigForPlace(cfg, kInOutland).dataMode == 1 && UsesFogData(cfg, kInEasternKingdoms),
+          "NorthrendClassicFog=0 gives Northrend the derived layers and leaves Outland and Azeroth alone");
+    cfg.dataMode = 0;
+    Check(ConfigForPlace(cfg, kInOutland).dataMode == 0, "DataMode=0 keeps the derived layers in every region");
 }
 
 constexpr float kNoon = 0.5f;
@@ -1142,6 +1286,731 @@ void CheckFogThinsIntoFoglessClassicLight(const FogData& data)
           "inside a Classic light without fog only the distance fog hides the far clip");
 }
 
+void CheckOutlandDensityThinsTheConvertedFog(const FogData& data)
+{
+    const Vec3 boneWastes = {-3005.0f, 4469.0f, -18.0f};
+    const Vec3 toSun = {0.607f, 0.607f, 0.513f};
+    const float evening = 0.7279f;
+    const FrameInputs frame = ContinentFrame(kOutland, boneWastes, evening, toSun, false);
+    AuthoredFog fog = {};
+    const bool resolved = data.Resolve(kOutland, frame.camPos, evening, kClearWeather, fog);
+    Config full = {};
+    full.outlandDensity = 1.0f;
+    Config halved = full;
+    halved.outlandDensity = 0.5f;
+    const FogParams fullParams = BuildFogParams(frame, ConfigForPlace(full, CameraPlace(frame)), &fog);
+    const FogParams halvedParams = BuildFogParams(frame, ConfigForPlace(halved, CameraPlace(frame)), &fog);
+    const float fullDensity = SceneLayersDensity(fullParams);
+    const float halvedDensity = SceneLayersDensity(halvedParams);
+    std::printf("     Bone Wastes at dusk: scene layer density %.6f at OutlandDensity 1, %.6f at 0.5\n",
+                fullDensity, halvedDensity);
+    Check(resolved && fullDensity > 0.0f && std::fabs(halvedDensity - 0.5f * fullDensity) < 1e-6f,
+          "OutlandDensity 0.5 halves the converted layers in the Bone Wastes");
+}
+
+void CheckLayerSlidersScaleTheClassicLayers(const FogData& data)
+{
+    const Vec3 boneWastes = {-3005.0f, 4469.0f, -18.0f};
+    const Vec3 toSun = {0.607f, 0.607f, 0.513f};
+    const float evening = 0.7279f;
+    const FrameInputs frame = ContinentFrame(kOutland, boneWastes, evening, toSun, false);
+    AuthoredFog fog = {};
+    const bool resolved = data.Resolve(kOutland, frame.camPos, evening, kClearWeather, fog);
+    const Config defaults;
+    Config moved = defaults;
+    moved.haze = 2.0f * defaults.haze;
+    moved.farFog = 0.0f;
+    moved.groundFog = 0.5f * defaults.groundFog;
+    const FogParams authored = BuildFogParams(frame, defaults, &fog);
+    const FogParams changed = BuildFogParams(frame, moved, &fog);
+    std::printf("     Bone Wastes layers haze/far wall/ground: %.6f %.6f %.6f by default, %.6f %.6f %.6f with "
+                "Haze x2, Distance fog 0, Ground fog x0.5\n",
+                authored.layers[0].density, authored.layers[1].density, authored.layers[2].density,
+                changed.layers[0].density, changed.layers[1].density, changed.layers[2].density);
+    Check(resolved && fog.layerCount == kSceneLayers &&
+              Near(authored.layers[0].density, fog.layers[0].density * 0.01f * defaults.density) &&
+              Near(changed.layers[0].density, 2.0f * authored.layers[0].density) &&
+              changed.layers[1].density == 0.0f && authored.layers[1].density > 0.0f &&
+              Near(changed.layers[2].density, 0.5f * authored.layers[2].density),
+          "Haze, Distance fog and Ground fog scale the Classic haze, far wall and ground layers relative to their "
+          "defaults, which keep the layers as authored");
+}
+
+void CheckConvertedGroundFogFollowsTheHeightOfItsLight(const FogData& data)
+{
+    const float boneWastes[3] = {-3005.0f, 4469.0f, -18.0f};
+    const float groundFogBelowTheGround = 150.0f;
+    AuthoredFog fog = {};
+    const bool resolved = data.Resolve(kOutland, boneWastes, kDayFraction1800, kClearWeather, fog);
+    const AuthoredLayer& ground = fog.layers[kSceneLayers - 1];
+    std::printf("     Bone Wastes at %.0f yd: converted ground fog from %.0f yd up to %.0f yd\n",
+                boneWastes[2], ground.lowerHeight, ground.upperHeight);
+    Check(resolved && fog.layerCount == kSceneLayers &&
+              ground.upperHeight < boneWastes[2] - groundFogBelowTheGround,
+          "a converted light lifts or lowers the absolute heights of its Classic layers by its height above the "
+          "Classic light, so the Bone Wastes' ground fog stays below their ground as the Classic ground fog stays "
+          "below its own light");
+
+    const float netherstormLight[3] = {3519.1f, 6896.3f, 142.1f};
+    const float azsharaLightAtNoHeight[3] = {3551.2f, -6765.3f, 0.0f};
+    const uint32_t netherstormLightId = kFirstClientLight + 500;
+    const uint32_t azsharaLightId = 238;
+    AuthoredFog converted = {};
+    AuthoredFog classic = {};
+    const bool bothResolved =
+        data.Resolve(kOutland, netherstormLight, kDayFraction1800, kClearWeather, converted) &&
+        data.Resolve(kKalimdor, azsharaLightAtNoHeight, kDayFraction1800, kClearWeather, classic);
+    std::printf("     Netherstorm light 500 (weight %.2f) haze from %.0f to %.0f yd; its Classic light 238 at Z 0 "
+                "(weight %.2f) from %.0f to %.0f yd\n",
+                WeightOf(converted, netherstormLightId), converted.layers[0].upperHeight,
+                converted.layers[0].lowerHeight, WeightOf(classic, azsharaLightId), classic.layers[0].upperHeight,
+                classic.layers[0].lowerHeight);
+    Check(bothResolved && WeightOf(converted, netherstormLightId) > 0.0f &&
+              Near(WeightOf(classic, azsharaLightId), 1.0f) &&
+              converted.layers[0].upperHeight == classic.layers[0].upperHeight &&
+              converted.layers[0].lowerHeight == classic.layers[0].lowerHeight,
+          "a converted light keeps the absolute heights of its Classic layers when either light has no height (Z 0, "
+          "as 234 Classic lights have), so Netherstorm keeps the haze of Azshara's light 238");
+}
+
+void CheckConvertedLightsCarryNoClassicNoise(const FogData& data)
+{
+    const float places[][3] = {{-3005.0f, 4469.0f, -18.0f}, {3054.0f, 3654.0f, 142.0f}, {1350.0f, -5000.0f, 210.0f}};
+    const int maps[] = {kOutland, kOutland, kNorthrend};
+    int layers = 0;
+    int noisy = 0;
+    for (int place = 0; place < static_cast<int>(std::size(maps)); ++place)
+    {
+        AuthoredFog fog = {};
+        if (!data.Resolve(maps[place], places[place], kDayFraction1800, kClearWeather, fog))
+            continue;
+        for (int i = 0; i < fog.layerCount; ++i)
+            noisy += fog.layers[i].noise.presence > 0.0f ? 1 : 0;
+        layers += fog.layerCount;
+    }
+    std::printf("     Bone Wastes, Netherstorm, Howling Fjord: %d of %d converted layers carry noise\n", noisy,
+                layers);
+    Check(layers == 3 * kSceneLayers && noisy == 0,
+          "the converted lights of Outland and Northrend carry no Classic noise, which showed nowhere there but made "
+          "Netherstorm look worse");
+}
+
+bool ScattersNoSunOrMoon(const FogParams& fog)
+{
+    for (const FogLayer& layer : fog.layers)
+        for (float c : layer.diffuse)
+            if (c != 0.0f)
+                return false;
+    return fog.lightVisibility == 0.0f;
+}
+
+float SceneLayersRedDiffuse(const FogParams& fog)
+{
+    float red = 0.0f;
+    for (int i = 0; i < kSceneLayers; ++i)
+        red += fog.layers[i].diffuse[0];
+    return red;
+}
+
+void CheckSunlessSkiesScatterNoSunOrMoon(const FogData& data)
+{
+    const Vec3 netherstorm = {3054.0f, 3654.0f, 142.0f};
+    const Vec3 shattrathCity = {-1829.0f, 5248.0f, -46.0f};
+    const Vec3 toLight = {0.607f, 0.607f, 0.513f};
+    const float evening = 0.7279f;
+    const FrameInputs sunOverNetherstorm = ContinentFrame(kOutland, netherstorm, evening, toLight, false);
+    const Config cfg = ConfigForPlace(Config{}, CameraPlace(sunOverNetherstorm));
+    const FrameInputs moonOverNetherstorm = ContinentFrame(kOutland, netherstorm, evening, toLight, true);
+    const FrameInputs sunOverShattrath = ContinentFrame(kOutland, shattrathCity, evening, toLight, false);
+    AuthoredFog sunless = {};
+    AuthoredFog sunlit = {};
+    const bool resolved = data.Resolve(kOutland, sunOverNetherstorm.camPos, evening, kClearWeather, sunless) &&
+                          data.Resolve(kOutland, sunOverShattrath.camPos, evening, kClearWeather, sunlit);
+    const FogParams sun = BuildFogParams(sunOverNetherstorm, cfg, &sunless);
+    const FogParams moon = BuildFogParams(moonOverNetherstorm, cfg, &sunless);
+    const FogParams shattrath = BuildFogParams(sunOverShattrath, cfg, &sunlit);
+    std::printf("     Netherstorm: sunless %.2f, scene diffuse red %.5f, distance fog %.5f, rays %.2f, density %.6f; "
+                "Shattrath City: sunless %.2f, scene diffuse red %.5f, rays %.2f\n",
+                sunless.sunless, SceneLayersRedDiffuse(sun), sun.layers[kDistanceFogLayer].diffuse[0],
+                sun.lightVisibility, SceneLayersDensity(sun), sunlit.sunless, SceneLayersRedDiffuse(shattrath),
+                shattrath.lightVisibility);
+    Check(resolved && Near(sunless.sunless, 1.0f) && sun.authored && SceneLayersDensity(sun) > 0.0f &&
+              ScattersNoSunOrMoon(sun) && ScattersNoSunOrMoon(moon),
+          "Netherstorm, whose sky the client draws without sun and moon, scatters neither in its converted layers "
+          "nor in its distance fog and casts no god rays, by day or by night");
+    Check(resolved && sunlit.sunless == 0.0f && SceneLayersRedDiffuse(shattrath) > 0.0f &&
+              shattrath.lightVisibility > 0.0f,
+          "Shattrath City, whose sky shows the sun, keeps its sun scatter and god rays");
+}
+
+struct Landmark
+{
+    const char* name;
+    int map;
+    float position[3];
+};
+
+constexpr uint32_t kSunKeepingCopyOfNorthrendGlobalLight = kFirstClientLight + kNorthrendGlobalClientLight;
+constexpr uint32_t kNoSunLayerFlag = 0x10;
+
+template <size_t N>
+bool LandmarksAtSunless(const FogData& data, const Landmark (&landmarks)[N], float sunless, const char* label,
+                        float sunlessByDay = 0.0f)
+{
+    bool all = true;
+    std::printf("     %s, sunless (by day) at 18:00:", label);
+    for (const Landmark& landmark : landmarks)
+    {
+        AuthoredFog fog = {};
+        const bool resolved = data.Resolve(landmark.map, landmark.position, kDayFraction1800, kClearWeather, fog);
+        std::printf(" %s %.2f (%.2f, %u)", landmark.name, fog.sunless, fog.sunlessByDay,
+                    fog.lightCount ? fog.lightIds[0] : 0u);
+        all = all && resolved && Near(fog.sunless, sunless) && Near(fog.sunlessByDay, sunlessByDay);
+    }
+    std::printf("\n");
+    return all;
+}
+
+AuthoredLayer WithoutTheSunFlag(AuthoredLayer layer)
+{
+    layer.sunless = 0.0f;
+    layer.flags &= ~kNoSunLayerFlag;
+    return layer;
+}
+
+bool SameFogApartFromTheSun(const AuthoredFog& a, const AuthoredFog& b)
+{
+    bool same = a.layerCount == b.layerCount && a.layerCount > 0 && a.lightCount == b.lightCount &&
+                std::equal(a.lightWeights, a.lightWeights + a.lightCount, b.lightWeights) &&
+                a.coverage == b.coverage && a.hasClassicDirectLight == b.hasClassicDirectLight &&
+                std::equal(std::begin(a.classicDirectLight), std::end(a.classicDirectLight), b.classicDirectLight) &&
+                a.hasGlow == b.hasGlow && a.glow == b.glow && a.hasGradingCurve == b.hasGradingCurve &&
+                std::equal(std::begin(a.gradingCurve), std::end(a.gradingCurve), b.gradingCurve) &&
+                a.clearSky == b.clearSky;
+    for (int i = 0; same && i < a.layerCount; ++i)
+    {
+        const AuthoredLayer x = WithoutTheSunFlag(a.layers[i]);
+        const AuthoredLayer y = WithoutTheSunFlag(b.layers[i]);
+        same = same && std::memcmp(&x, &y, sizeof(AuthoredLayer)) == 0;
+    }
+    return same;
+}
+
+void CheckGrizzlyHillsSholazarAndBoreanTundraKeepTheSun(const FogData& data)
+{
+    const Landmark sunKept[] = {
+        {"Grizzlemaw", kNorthrend, {4022.6f, -3820.9f, 114.6f}},
+        {"Amberpine Lodge", kNorthrend, {3456.5f, -2778.6f, 200.4f}},
+        {"Warsong Hold", kNorthrend, {2741.3f, 6097.2f, 76.9f}},
+        {"Valiance Keep", kNorthrend, {2213.9f, 5273.1f, 11.3f}},
+        {"Transitus Shield", kNorthrend, {3587.3f, 6661.5f, 195.4f}},
+        {"Nesingwary Base Camp", kNorthrend, {5595.1f, 5831.6f, -67.5f}},
+        {"Rainspeaker Canopy", kNorthrend, {5670.8f, 4561.3f, -136.5f}},
+    };
+    const Landmark sunless[] = {
+        {"Shadow Vault", kNorthrend, {8447.4f, 2698.1f, 656.8f}},
+        {"Balargarde Fortress", kNorthrend, {7060.0f, 4256.8f, 676.9f}},
+        {"The Fleshwerks", kNorthrend, {6490.0f, 3427.7f, 595.7f}},
+        {"Dun Niffelem", kNorthrend, {7201.8f, -2721.2f, 764.2f}},
+        {"K3", kNorthrend, {6122.2f, -1061.5f, 402.6f}},
+        {"Howling Fjord", kNorthrend, {1350.0f, -5000.0f, 210.0f}},
+        {"Wintergrasp", kNorthrend, {5100.0f, 2750.0f, 443.7f}},
+        {"Moonrest Gardens", kNorthrend, {3323.2f, 2717.3f, 36.5f}},
+        {"Naxxramas", kNorthrend, {3668.7f, -1262.5f, 243.6f}},
+        {"Light's Breach", kNorthrend, {5148.5f, -2182.6f, 236.6f}},
+        {"Telredor", kOutland, {278.6f, 6001.3f, 144.7f}},
+    };
+    Check(LandmarksAtSunless(data, sunKept, 0.0f, "Grizzly Hills, Borean Tundra, Coldarra, Sholazar Basin"),
+          "Grizzly Hills, Borean Tundra with Coldarra and Sholazar Basin keep the sun and moon again: their zone "
+          "outlines hold a copy of Northrend's global light that keeps the sun, and their own skies keep it in "
+          "their sphere lights");
+    Check(LandmarksAtSunless(data, sunless, 1.0f,
+                             "Icecrown, Storm Peaks, Howling Fjord, Wintergrasp, Dragonblight, Zul'Drak, Zangarmarsh"),
+          "Icecrown, the Storm Peaks, the Howling Fjord and Zangarmarsh stay sunless, and so do Wintergrasp, "
+          "Dragonblight and Zul'Drak about 300 to 520 yd past the Borean and Grizzly Hills outlines");
+
+    const float* grizzlemaw = sunKept[0].position;
+    const float* warsongHold = sunKept[2].position;
+    const float* howlingFjord = sunless[5].position;
+    AuthoredFog grizzly = {};
+    AuthoredFog borean = {};
+    AuthoredFog fjord = {};
+    const bool resolved = data.Resolve(kNorthrend, grizzlemaw, kDayFraction1800, kClearWeather, grizzly) &&
+                          data.Resolve(kNorthrend, warsongHold, kDayFraction1800, kClearWeather, borean) &&
+                          data.Resolve(kNorthrend, howlingFjord, kDayFraction1800, kClearWeather, fjord);
+    std::printf("     sun-keeping copy %u: weight %.2f at Grizzlemaw, %.2f at Warsong Hold, %.2f at the Howling "
+                "Fjord, where light %u has %.2f\n",
+                kSunKeepingCopyOfNorthrendGlobalLight, WeightOf(grizzly, kSunKeepingCopyOfNorthrendGlobalLight),
+                WeightOf(borean, kSunKeepingCopyOfNorthrendGlobalLight),
+                WeightOf(fjord, kSunKeepingCopyOfNorthrendGlobalLight), kNorthrendGlobalClientLight,
+                WeightOf(fjord, kNorthrendGlobalClientLight));
+    Check(resolved && Near(WeightOf(grizzly, kSunKeepingCopyOfNorthrendGlobalLight), 1.0f) &&
+              Near(WeightOf(borean, kSunKeepingCopyOfNorthrendGlobalLight), 1.0f) &&
+              WeightOf(fjord, kSunKeepingCopyOfNorthrendGlobalLight) == 0.0f &&
+              SameFogApartFromTheSun(grizzly, fjord) && SameFogApartFromTheSun(borean, fjord),
+          "inside the Grizzly Hills and Borean Tundra outlines the copy replaces Northrend's global light with the "
+          "same layers, glow, direct light and grading; outside them, as at the Howling Fjord, the global light "
+          "stays");
+
+    AuthoredFog grizzlyGhost = {};
+    AuthoredFog fjordGhost = {};
+    AuthoredFog grizzlyHalfStorm = {};
+    const LightParamsSelection ghost = ScreenEffectSlot(FogData::kDeathSlot, 0.0f);
+    const bool resolvedSlots =
+        data.Resolve(kNorthrend, grizzlemaw, kDayFraction1800, ghost, grizzlyGhost) &&
+        data.Resolve(kNorthrend, howlingFjord, kDayFraction1800, ghost, fjordGhost) &&
+        data.Resolve(kNorthrend, grizzlemaw, kDayFraction1800, Storm(0.5f), grizzlyHalfStorm);
+    std::printf("     Grizzlemaw: sunless %.2f as a ghost (Howling Fjord %.2f), %.2f at half storm\n",
+                grizzlyGhost.sunless, fjordGhost.sunless, grizzlyHalfStorm.sunless);
+    Check(resolvedSlots && Near(grizzlyGhost.sunless, 1.0f) && Near(fjordGhost.sunless, 1.0f) &&
+              SameFogApartFromTheSun(grizzlyGhost, fjordGhost) && Near(grizzlyHalfStorm.sunless, 0.0f),
+          "the copy keeps the sun in its clear and storm slots alike, so Grizzlemaw stays sunlit at half storm, "
+          "while its ghost slot is 1406's own: the spirit sky over Grizzlemaw stays sunless as at the Howling Fjord");
+
+    const Vec3 toLight = {0.607f, 0.607f, 0.513f};
+    const Vec3 eye = {grizzlemaw[0], grizzlemaw[1], grizzlemaw[2]};
+    const Config cfg = ConfigForPlace(Config{}, PlaceOf(kNorthrend, grizzlemaw));
+    const FogParams sun = BuildFogParams(ContinentFrame(kNorthrend, eye, kDayFraction1800, toLight, false), cfg,
+                                         &grizzly);
+    const FogParams moon = BuildFogParams(ContinentFrame(kNorthrend, eye, kDayFraction1800, toLight, true), cfg,
+                                          &grizzly);
+    std::printf("     Grizzlemaw: scene diffuse red %.5f by the sun, %.5f by the moon, rays %.2f\n",
+                SceneLayersRedDiffuse(sun), SceneLayersRedDiffuse(moon), sun.lightVisibility);
+    Check(resolved && sun.authored && SceneLayersRedDiffuse(sun) > 0.0f && SceneLayersRedDiffuse(moon) > 0.0f &&
+              sun.lightVisibility > 0.0f,
+          "Grizzlemaw in Grizzly Hills scatters the sun and the moon in its converted layers and casts god rays");
+}
+
+void CheckSunlessByDayKeepsTheMoon()
+{
+    AuthoredFog fog = {};
+    fog.layerCount = 1;
+    AuthoredLayer& layer = fog.layers[0];
+    layer.diffuse[0] = layer.diffuse[1] = layer.diffuse[2] = 0.8f;
+    layer.intensity = 1.0f;
+    layer.density = 0.002f;
+    layer.g = 0.7f;
+    layer.upperHeight = 400.0f;
+    layer.sunlessByDay = 1.0f;
+    fog.sunlessByDay = 1.0f;
+    const Vec3 eye = {0.0f, 0.0f, 50.0f};
+    const Vec3 toLight = {0.6f, 0.6f, 0.5f};
+    FrameInputs day = ContinentFrame(kOutland, eye, kNoon, toLight, false);
+    day.sunColor = day.directColor = 0xFFFFFFFF;
+    FrameInputs night = day;
+    night.lightIsMoon = true;
+    const Config cfg = {};
+    const FogParams byDay = BuildFogParams(day, cfg, &fog);
+    const FogParams byNight = BuildFogParams(night, cfg, &fog);
+    std::printf("     sun-dropping layer: diffuse red by day %.4f, rays %.2f; by night %.4f, rays %.2f\n",
+                byDay.layers[0].diffuse[0], byDay.lightVisibility, byNight.layers[0].diffuse[0],
+                byNight.lightVisibility);
+    Check(ScattersNoSunOrMoon(byDay) && byNight.layers[0].diffuse[0] > 0.0f && byNight.lightVisibility > 0.0f,
+          "a layer flagged sunless by day scatters no sun and casts no god rays by day, and scatters the moon by "
+          "night");
+}
+
+void CheckGhostlandsScattersNoSun(const FogData& data)
+{
+    const Landmark ghostlands[] = {
+        {"Tranquillien", kOutland, {7595.0f, -6782.0f, 87.0f}},
+        {"Ghostlands", kOutland, {7360.9f, -6803.3f, 44.3f}},
+        {"Zul'Aman gate", kOutland, {6851.8f, -7972.6f, 179.2f}},
+        {"south of the zone", kOutland, {6338.0f, -6400.0f, 85.0f}},
+    };
+    const Landmark quelThalas[] = {
+        {"Silvermoon City", kOutland, {9473.0f, -7279.7f, 14.2f}},
+        {"Eversong Woods", kOutland, {9079.9f, -7193.2f, 55.6f}},
+        {"Sunstrider Isle", kOutland, {10349.6f, -6357.3f, 33.4f}},
+        {"Isle of Quel'Danas", kOutland, {12806.5f, -6911.1f, 41.1f}},
+    };
+    Check(LandmarksAtSunless(data, ghostlands, 0.0f, "Ghostlands", 1.0f),
+          "the Ghostlands lights drop the sun by day, although the client draws one over the zone, and keep the moon");
+    Check(LandmarksAtSunless(data, quelThalas, 0.0f, "Eversong Woods, Silvermoon City, Isle of Quel'Danas"),
+          "Eversong Woods, Silvermoon City and the Isle of Quel'Danas keep the sun beside the Ghostlands");
+
+    const Vec3 toLight = {0.607f, 0.607f, 0.513f};
+    const Vec3 tranquillien = {ghostlands[0].position[0], ghostlands[0].position[1], ghostlands[0].position[2]};
+    const Vec3 silvermoon = {quelThalas[0].position[0], quelThalas[0].position[1], quelThalas[0].position[2]};
+    const Config cfg = ConfigForPlace(Config{}, PlaceOf(kOutland, ghostlands[0].position));
+    AuthoredFog ghostly = {};
+    AuthoredFog sunlit = {};
+    const bool resolved = data.Resolve(kOutland, ghostlands[0].position, kDayFraction1800, kClearWeather, ghostly) &&
+                          data.Resolve(kOutland, quelThalas[0].position, kDayFraction1800, kClearWeather, sunlit);
+    const FogParams sun = BuildFogParams(ContinentFrame(kOutland, tranquillien, kDayFraction1800, toLight, false),
+                                         cfg, &ghostly);
+    const FogParams moon = BuildFogParams(ContinentFrame(kOutland, tranquillien, kDayFraction1800, toLight, true),
+                                          cfg, &ghostly);
+    const FogParams eversong = BuildFogParams(ContinentFrame(kOutland, silvermoon, kDayFraction1800, toLight, false),
+                                              cfg, &sunlit);
+    std::printf("     Tranquillien: scene diffuse red %.5f, distance fog %.5f, rays %.2f, density %.6f; Silvermoon "
+                "City: scene diffuse red %.5f, rays %.2f\n",
+                SceneLayersRedDiffuse(sun), sun.layers[kDistanceFogLayer].diffuse[0], sun.lightVisibility,
+                SceneLayersDensity(sun), SceneLayersRedDiffuse(eversong), eversong.lightVisibility);
+    std::printf("     Tranquillien by night: scene diffuse red %.5f, rays %.2f\n", SceneLayersRedDiffuse(moon),
+                moon.lightVisibility);
+    Check(resolved && sun.authored && SceneLayersDensity(sun) > 0.0f && ScattersNoSunOrMoon(sun),
+          "Tranquillien keeps its converted fog but scatters no sun in it or in its distance fog and casts no god "
+          "rays by day");
+    Check(resolved && SceneLayersRedDiffuse(moon) > 0.0f && moon.lightVisibility > 0.0f,
+          "Tranquillien scatters the moon by night, which the zone's sun-dropping flag leaves alone");
+    Check(resolved && SceneLayersRedDiffuse(eversong) > 0.0f && eversong.lightVisibility > 0.0f,
+          "Silvermoon City keeps its sun scatter and god rays");
+}
+
+template <size_t N>
+bool LandmarksInRegion(const Landmark (&landmarks)[N], MapRegion region, const char* label)
+{
+    bool all = true;
+    std::printf("     %s:", label);
+    for (const Landmark& landmark : landmarks)
+    {
+        const MapRegion found = RegionOf(PlaceOf(landmark.map, landmark.position));
+        std::printf(" %s %s", landmark.name, RegionName(found));
+        all = all && found == region;
+    }
+    std::printf("\n");
+    return all;
+}
+
+constexpr int kRedridgeMountains = 44;
+constexpr int kTheBarrens = 17;
+constexpr int kDurotar = 14;
+
+void CheckZoneHaloFade()
+{
+    ZoneHaloFade fade;
+    const ZoneHalo first = fade.Advance(kDurotar, {1.0f, 1.0f}, 10.0);
+    const ZoneHalo slider = fade.Advance(kDurotar, {0.5f, 1.0f}, 10.016);
+    const ZoneHalo crossed = fade.Advance(kTheBarrens, {1.5f, 1.0f}, 10.032);
+    const ZoneHalo halfway = fade.Advance(kTheBarrens, {1.5f, 1.0f}, 10.032 + kZoneHaloFadeSeconds);
+    const ZoneHalo settled = fade.Advance(kTheBarrens, {1.5f, 1.0f}, 10.032 + 10.0 * kZoneHaloFadeSeconds);
+    const ZoneHalo edited = fade.Advance(kTheBarrens, {0.8f, 1.0f}, 10.048 + 10.0 * kZoneHaloFadeSeconds);
+    ZoneHaloFade densityFade;
+    densityFade.Advance(kDurotar, {1.0f, 1.0f, 1.0f}, 30.0);
+    const ZoneHalo denser = densityFade.Advance(kTheBarrens, {1.0f, 1.0f, 2.0f}, 30.016);
+    const ZoneHalo denserSettled = densityFade.Advance(kTheBarrens, {1.0f, 1.0f, 2.0f}, 30.016 + 10.0 *
+                                                                                              kZoneHaloFadeSeconds);
+    std::printf("     sun halo: start %.2f, slider %.2f, border %.2f, after %.1f s %.2f, settled %.2f, edited %.2f\n",
+                first.sun, slider.sun, crossed.sun, kZoneHaloFadeSeconds, halfway.sun, settled.sun, edited.sun);
+    Check(Near(first.sun, 1.0f) && Near(slider.sun, 0.5f) && crossed.sun > 0.5f && crossed.sun < 0.6f && halfway.sun > crossed.sun &&
+              halfway.sun < 1.5f && Near(settled.sun, 1.5f) && Near(edited.sun, 0.8f) &&
+              crossed.zoneId == kTheBarrens && denser.density > 1.0f && denser.density < 1.1f &&
+              Near(denserSettled.density, 2.0f),
+          "a zone border fades the halo and the fog density over about two seconds, while a slider in the same zone "
+          "takes effect at once");
+}
+
+void CheckZoneHaloKeepsTheZoneThroughAnUnknownOne()
+{
+    constexpr int kDuskwood = 10;
+    ZoneHaloBook book;
+    book.Advance(kDuskwood, "Duskwood", 20.0);
+    book.Edit({0.65f, 1.0f});
+    const ZoneHalo duskwood = book.Advance(kDuskwood, "Duskwood", 20.016);
+    const ZoneHalo loading = book.Advance(0, "", 21.0);
+    const ZoneHalo back = book.Advance(kDuskwood, "Duskwood", 21.5);
+    std::printf("     Duskwood %.2f, zone 0 for a second %.2f (zone %d), back %.2f\n", duskwood.sun, loading.sun,
+                loading.zoneId, back.sun);
+    Check(Near(duskwood.sun, 0.65f) && Near(loading.sun, 0.65f) && loading.zoneId == kDuskwood &&
+              Near(back.sun, 0.65f) && book.Current().zoneId == kDuskwood,
+          "a moment without a zone (0, as the client reported for a second in Duskwood) keeps the last zone's "
+          "halo instead of fading toward 1 and back");
+}
+
+void CheckZoneHaloScalesTheScatter()
+{
+    const Vec3 barrens = {-452.0f, -2652.0f, 92.0f};
+    const Vec3 toLight = {0.56f, 0.56f, 0.61f};
+    FrameInputs plain = ContinentFrame(kKalimdor, barrens, kNoon, toLight, false);
+    plain.sunColor = plain.directColor = 0xFFFFFFFF;
+    FrameInputs halved = plain;
+    halved.zoneHalo = {kTheBarrens, 0.5f, 1.0f};
+    FrameInputs night = plain;
+    night.lightIsMoon = true;
+    FrameInputs nightHalved = night;
+    nightHalved.zoneHalo = {kTheBarrens, 0.5f, 0.25f};
+    const Config cfg = ConfigForPlace(Config{}, CameraPlace(plain));
+    const FogParams a = BuildFogParams(plain, cfg, nullptr);
+    const FogParams b = BuildFogParams(halved, cfg, nullptr);
+    const FogParams c = BuildFogParams(night, cfg, nullptr);
+    const FogParams d = BuildFogParams(nightHalved, cfg, nullptr);
+    std::printf("     haze diffuse by day %.4f -> %.4f at sun halo 0.5, by night %.4f -> %.4f at moon halo 0.25\n",
+                a.layers[0].diffuse[0], b.layers[0].diffuse[0], c.layers[0].diffuse[0], d.layers[0].diffuse[0]);
+    Check(a.layers[0].diffuse[0] > 0.0f && Near(b.layers[0].diffuse[0], 0.5f * a.layers[0].diffuse[0]) &&
+              c.layers[0].diffuse[0] > 0.0f && Near(d.layers[0].diffuse[0], 0.25f * c.layers[0].diffuse[0]),
+          "the zone's sun halo scales the sun's scattering by day and its moon halo the moon's by night");
+}
+
+void CheckZoneDensityScalesTheFog()
+{
+    const Vec3 barrens = {-452.0f, -2652.0f, 92.0f};
+    const Vec3 toLight = {0.56f, 0.56f, 0.61f};
+    const FrameInputs plain = ContinentFrame(kKalimdor, barrens, kNoon, toLight, false);
+    FrameInputs denser = plain;
+    denser.zoneHalo = {kTheBarrens, 1.0f, 1.0f, 2.5f};
+    FrameInputs clear = plain;
+    clear.zoneHalo = {kTheBarrens, 1.0f, 1.0f, 0.0f};
+    const Config cfg;
+    const Config regional = ConfigForPlace(cfg, CameraPlace(plain));
+    const FogParams a = BuildFogParams(plain, ConfigForFrame(cfg, plain), nullptr);
+    const FogParams b = BuildFogParams(denser, ConfigForFrame(cfg, denser), nullptr);
+    const FogParams c = BuildFogParams(clear, ConfigForFrame(cfg, clear), nullptr);
+    std::printf("     density %.3f in the region, %.3f at zone density 2.5; haze layer %.6f -> %.6f, %.6f at 0\n",
+                regional.density, ConfigForFrame(cfg, denser).density, a.layers[0].density, b.layers[0].density,
+                c.layers[0].density);
+    Check(Near(ConfigForFrame(cfg, plain).density, regional.density) &&
+              Near(ConfigForFrame(cfg, denser).density, 2.5f * regional.density) && a.layers[0].density > 0.0f &&
+              Near(b.layers[0].density, 2.5f * a.layers[0].density) && c.layers[0].density == 0.0f,
+          "the zone's fog density multiplies the region's density, and through it every layer of the fog, while "
+          "1 leaves it as the region sets it and 0 clears it");
+}
+
+void CheckMap530StartingZonesHaveTheirOwnRegion()
+{
+    const Landmark outland[] = {
+        {"Bone Wastes", kOutland, {-3005.0f, 4469.0f, -18.0f}},
+        {"Shattrath City", kOutland, {-1829.0f, 5248.0f, -46.0f}},
+        {"Netherstorm", kOutland, {3054.0f, 3654.0f, 142.0f}},
+        {"Netherwing Ledge", kOutland, {-5248.0f, 166.0f, 72.0f}},
+        {"farthest reach of an Outland light", kOutland, {-3824.0f, -727.0f, 94.0f}},
+    };
+    const Landmark startingZones[] = {
+        {"Tranquillien", kOutland, {7595.0f, -6782.0f, 87.0f}},
+        {"Silvermoon City", kOutland, {9473.0f, -7279.7f, 14.2f}},
+        {"Sunstrider Isle", kOutland, {10349.6f, -6357.3f, 33.4f}},
+        {"Isle of Quel'Danas", kOutland, {12806.5f, -6911.1f, 41.1f}},
+        {"edge of the Quel'Thalas light nearest Outland", kOutland, {6099.0f, -4373.0f, 37.0f}},
+        {"The Exodar", kOutland, {-3965.0f, -11653.0f, -138.0f}},
+        {"Azure Watch", kOutland, {-4127.0f, -12520.0f, 45.0f}},
+        {"Blood Watch", kOutland, {-1920.0f, -11850.0f, 50.0f}},
+    };
+    Check(LandmarksInRegion(outland, MapRegion::Outland, "map 530, Outland"),
+          "Outland proper on map 530 keeps the Outland settings, out to the farthest reach of its lights");
+    Check(LandmarksInRegion(startingZones, MapRegion::TBCStart, "map 530, Quel'Thalas and the Azuremyst isles"),
+          "Eversong Woods, the Ghostlands, Silvermoon, Quel'Danas, the Azuremyst and Bloodmyst isles and the Exodar "
+          "share map 530 with Outland but are the Burning Crusade starting zones");
+
+    Config cfg = {};
+    cfg.azerothDensity = 1.5f;
+    cfg.outlandDensity = 0.5f;
+    cfg.tbcStartDensity = 1.0f;
+    cfg.azerothLocalLights = 1.0f;
+    cfg.outlandLocalLights = 3.0f;
+    cfg.tbcStartLocalLights = 2.0f;
+    cfg.outlandClassicFog = 0;
+    const MapPlace tranquillien = PlaceOf(kOutland, startingZones[0].position);
+    const MapPlace boneWastes = PlaceOf(kOutland, outland[0].position);
+    const PointLightUpload ghostlandsLamps = LocalLightUpload(cfg, tranquillien);
+    const PointLightUpload outlandLamps = LocalLightUpload(cfg, boneWastes);
+    std::printf("     Tranquillien: density %.2f, reach x%.3g; Bone Wastes: density %.2f, reach x%.3g\n",
+                ConfigForPlace(cfg, tranquillien).density, ghostlandsLamps.reach,
+                ConfigForPlace(cfg, boneWastes).density, outlandLamps.reach);
+    Check(Near(ConfigForPlace(cfg, tranquillien).density, cfg.density * cfg.tbcStartDensity) &&
+              Near(ghostlandsLamps.reach, cfg.tbcStartLocalLights) && UsesFogData(cfg, tranquillien) &&
+              Near(ConfigForPlace(cfg, boneWastes).density, cfg.density * cfg.outlandDensity) &&
+              Near(outlandLamps.reach, cfg.outlandLocalLights) && !UsesFogData(cfg, boneWastes),
+          "the Ghostlands take the starting zones' density and local lights and keep their converted fog data under "
+          "OutlandClassicFog=0, the Bone Wastes take Outland's");
+    Check(Config().tbcStartDensity == 1.0f && Config().tbcStartLocalLights == 2.5f &&
+              Config().tbcStartSkyColor == 0.0f,
+          "the starting zones start at density 1 and local lights 2.5, as the owner chose after Falconwing Square");
+    Check(RegionOf(PlaceOf(kOutland, kNowhereReadable)) == MapRegion::Outland,
+          "map 530 counts as Outland while the camera position is unreadable");
+}
+
+AuthoredFog WithoutClearSky(AuthoredFog fog)
+{
+    fog.clearSky = 0.0f;
+    for (AuthoredLayer& layer : fog.layers)
+        layer.clearSky = 0.0f;
+    return fog;
+}
+
+void CheckHellfireKeepsOnlyAThinGroundFogUnderAClearSky(const FogData& data)
+{
+    const Vec3 hellfirePeninsula = {-258.0f, 1800.0f, 105.0f};
+    const Vec3 netherstorm = {3054.0f, 3654.0f, 142.0f};
+    const Vec3 toLight = {0.607f, 0.607f, 0.513f};
+    const float evening = 0.7279f;
+    const float oneDegreeUpward = 0.0175f;
+    const float clearAtOneDegree = 1.0e-6f;
+    const float groundThinEnoughForDistanceFog = 0.01f;
+    const uint32_t hellfireLight = kFirstClientLight + 520;
+    const FrameInputs frame = ContinentFrame(kOutland, hellfirePeninsula, evening, toLight, false);
+    const Config cfg = ConfigForPlace(Config{}, CameraPlace(frame));
+    AuthoredFog hellfire = {};
+    AuthoredFog other = {};
+    const bool resolved = data.Resolve(kOutland, frame.camPos, evening, kClearWeather, hellfire) &&
+                          data.Resolve(kOutland, &netherstorm.x, evening, kClearWeather, other);
+    AuthoredFog thinGround = hellfire;
+    thinGround.layers[kSceneLayers - 1].density *= groundThinEnoughForDistanceFog;
+    const AuthoredFog hellfireWithSky = WithoutClearSky(hellfire);
+    const AuthoredFog thinGroundWithSky = WithoutClearSky(thinGround);
+    const FogParams fog = BuildFogParams(frame, cfg, &hellfire);
+    const FogParams skyFogged = BuildFogParams(frame, cfg, &hellfireWithSky);
+    const FogParams thin = BuildFogParams(frame, cfg, &thinGround);
+    const FogParams thinSkyFogged = BuildFogParams(frame, cfg, &thinGroundWithSky);
+    const FogLayer& ground = fog.layers[kSceneLayers - 1];
+    const float groundSkyScale = std::exp(-oneDegreeUpward * ground.skyFalloff);
+    const float foggedSkyScale = std::exp(-oneDegreeUpward * skyFogged.layers[kSceneLayers - 1].skyFalloff);
+    std::printf("     Hellfire Peninsula (light 520, weight %.2f): haze %.6f, far wall %.6f, ground %.6f, distance fog "
+                "%.6f, ground fog on the sky 1 degree up x%.2g (x%.2g without the clear sky); with a hundredth of "
+                "the ground fog the distance fog is %.6f, %.6f without the clear sky\n",
+                WeightOf(hellfire, hellfireLight), fog.layers[0].density, fog.layers[1].density, ground.density,
+                fog.layers[kDistanceFogLayer].density, groundSkyScale, foggedSkyScale,
+                thin.layers[kDistanceFogLayer].density, thinSkyFogged.layers[kDistanceFogLayer].density);
+    Check(resolved && Near(WeightOf(hellfire, hellfireLight), 1.0f) && Near(hellfire.clearSky, 1.0f) &&
+              fog.layers[0].density == 0.0f && fog.layers[1].density == 0.0f && ground.density > 0.0f &&
+              fog.layers[kDistanceFogLayer].density == 0.0f && groundSkyScale < clearAtOneDegree &&
+              ScattersNoSunOrMoon(fog),
+          "Hellfire Peninsula keeps only its ground fog, without sun, and leaves its sky untouched: no haze, far "
+          "wall or distance fog, and no ground fog on the sky from a degree above the horizon");
+    Check(resolved && foggedSkyScale == 1.0f && thin.layers[kDistanceFogLayer].density == 0.0f &&
+              thinSkyFogged.layers[kDistanceFogLayer].density > 0.0f && other.clearSky == 0.0f &&
+              other.layerCount > 0,
+          "it is Hellfire's clear sky that keeps the ground fog off the sky and the distance fog away even where "
+          "the ground fog is thin; Netherstorm's sky stays as it was");
+}
+
+void CheckMoonScattersOnItsOwn(const FogData& data)
+{
+    const Vec3 goldshire = {-9456.8f, 54.7f, 59.6f};
+    const Vec3 toLight = {0.607f, 0.607f, 0.513f};
+    const float evening = 0.7279f;
+    const FrameInputs sunLit = ContinentFrame(kEasternKingdoms, goldshire, evening, toLight, false);
+    const FrameInputs moonLit = ContinentFrame(kEasternKingdoms, goldshire, evening, toLight, true);
+    AuthoredFog fog = {};
+    const bool resolved = data.Resolve(kEasternKingdoms, sunLit.camPos, evening, kClearWeather, fog);
+    const Config defaults;
+    Config noSun = defaults;
+    noSun.sunScatter = 0.0f;
+    const FogParams sun = BuildFogParams(sunLit, defaults, &fog);
+    const FogParams moon = BuildFogParams(moonLit, defaults, &fog);
+    const FogParams darkSun = BuildFogParams(sunLit, noSun, &fog);
+    const FogParams moonWithoutSun = BuildFogParams(moonLit, noSun, &fog);
+    bool share = resolved && sun.authored;
+    bool own = share;
+    int lit = 0;
+    for (int i = 0; i < kFogLayers; ++i)
+        for (int c = 0; c < 3; ++c)
+        {
+            if (sun.layers[i].diffuse[c] <= 0.0f)
+                continue;
+            ++lit;
+            share = share && Near(moon.layers[i].diffuse[c], defaults.moonScatter * sun.layers[i].diffuse[c]);
+            own = own && darkSun.layers[i].diffuse[c] == 0.0f &&
+                  Near(moonWithoutSun.layers[i].diffuse[c], moon.layers[i].diffuse[c]);
+        }
+    std::printf("     Goldshire haze diffuse red: sun %.6f, moon %.6f at MoonScatter %.2f; with SunScatter 0: sun "
+                "%.6f, moon %.6f\n",
+                sun.layers[0].diffuse[0], moon.layers[0].diffuse[0], defaults.moonScatter,
+                darkSun.layers[0].diffuse[0], moonWithoutSun.layers[0].diffuse[0]);
+    Check(defaults.moonScatter == 0.2f && lit > 0 && share && own,
+          "the moon scatters MoonScatter (0.2 by default) of the sun's light in the Classic and distance layers, on "
+          "its own: SunScatter 0 darkens the sun's halo and leaves the moon's");
+}
+
+struct RegionLights
+{
+    int map;
+    float intensity;
+};
+
+void CheckLocalLightsGlowByRegion()
+{
+    const Vec3 eye = {-3005.0f, 4469.0f, -18.0f};
+    const Vec3 toLight = {0.607f, 0.607f, 0.513f};
+    const float evening = 0.7279f;
+    bool followsRegion = true;
+    for (float density : {0.15f, 0.5f, 1.0f, 2.0f})
+    {
+        Config cfg;
+        cfg.azerothDensity = density;
+        cfg.outlandDensity = density;
+        cfg.northrendDensity = density;
+        cfg.azerothLocalLights = 1.5f;
+        cfg.outlandLocalLights = 2.5f;
+        cfg.northrendLocalLights = 4.0f;
+        const RegionLights regions[] = {{kEasternKingdoms, 1.5f}, {kOutland, 2.5f}, {kNorthrend, 4.0f}};
+        for (const RegionLights& region : regions)
+        {
+            const FrameInputs frame = ContinentFrame(region.map, eye, evening, toLight, false);
+            const FogParams fog = BuildFogParams(frame, ConfigForPlace(cfg, CameraPlace(frame)), nullptr);
+            followsRegion = followsRegion && Near(fog.localLightGain * density, region.intensity);
+        }
+    }
+    const Config defaults;
+    const FrameInputs inOutland = ContinentFrame(kOutland, eye, evening, toLight, false);
+    const FrameInputs inAzeroth = ContinentFrame(kEasternKingdoms, eye, evening, toLight, false);
+    const FogParams outland = BuildFogParams(inOutland, ConfigForPlace(defaults, CameraPlace(inOutland)), nullptr);
+    const FogParams azeroth = BuildFogParams(inAzeroth, ConfigForPlace(defaults, CameraPlace(inAzeroth)), nullptr);
+    std::printf("     local light gain by default: Outland %.3f, Azeroth %.3f\n", outland.localLightGain,
+                azeroth.localLightGain);
+    Check(followsRegion && Near(azeroth.localLightGain, 1.0f) && defaults.outlandLocalLights == 8.0f &&
+              defaults.northrendLocalLights == 8.0f && Near(outland.localLightGain, 8.0f / 0.15f),
+          "the local lights scatter with their region's intensity over the region's density, so the density "
+          "sliders leave the lamps' glow alone; Outland and Northrend start at 8, the most the testers' slider "
+          "reached when they matched the old world's lamps there, and Azeroth stays as before by default");
+}
+
+void CheckOutlandSkyColourTintsTheConvertedFog(const FogData& data)
+{
+    const Vec3 boneWastes = {-3005.0f, 4469.0f, -18.0f};
+    const Vec3 toSun = {0.607f, 0.607f, 0.513f};
+    const float evening = 0.7279f;
+    FrameInputs frame = ContinentFrame(kOutland, boneWastes, evening, toSun, false);
+    frame.fogColor = 0xFF7A3A2Au;
+    AuthoredFog fog = {};
+    const bool resolved = data.Resolve(kOutland, frame.camPos, evening, kClearWeather, fog);
+    Config asConverted = {};
+    asConverted.outlandSkyColor = 0.0f;
+    Config sky = asConverted;
+    sky.outlandSkyColor = 1.0f;
+    Config half = asConverted;
+    half.outlandSkyColor = 0.5f;
+    const FogParams converted = BuildFogParams(frame, ConfigForPlace(asConverted, CameraPlace(frame)), &fog);
+    const FogParams own = BuildFogParams(frame, ConfigForPlace(sky, CameraPlace(frame)), &fog);
+    const FogParams mixed = BuildFogParams(frame, ConfigForPlace(half, CameraPlace(frame)), &fog);
+    float clientFog[3];
+    UnpackColor(frame.fogColor, clientFog);
+    for (float& c : clientFog)
+        c = std::pow(c, 2.2f);
+    bool takesClientFog = true;
+    bool halfway = true;
+    const auto luminance = [](const float* rgb) { return 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2]; };
+    const auto hasClientHue = [&](const float* rgb) {
+        const float scale = luminance(rgb) / luminance(clientFog);
+        return std::fabs(rgb[0] - clientFog[0] * scale) < 1e-4f && std::fabs(rgb[1] - clientFog[1] * scale) < 1e-4f &&
+               std::fabs(rgb[2] - clientFog[2] * scale) < 1e-4f;
+    };
+    for (int i = 0; i < fog.layerCount; ++i)
+    {
+        takesClientFog = takesClientFog && hasClientHue(own.layers[i].emissive) &&
+                         hasClientHue(own.layers[i].shadowEmissive) &&
+                         std::fabs(luminance(own.layers[i].emissive) - luminance(converted.layers[i].emissive)) < 1e-4f;
+        for (int c = 0; c < 3; ++c)
+            halfway = halfway && std::fabs(mixed.layers[i].emissive[c] - 0.5f * (converted.layers[i].emissive[c] +
+                                                                                    own.layers[i].emissive[c])) < 1e-5f;
+    }
+    std::printf("     Bone Wastes layer 1 emissive: converted %.3f %.3f %.3f, client fog hue %.3f %.3f %.3f\n",
+                converted.layers[1].emissive[0], converted.layers[1].emissive[1], converted.layers[1].emissive[2],
+                own.layers[1].emissive[0], own.layers[1].emissive[1], own.layers[1].emissive[2]);
+    Check(resolved && fog.layerCount > 0 && takesClientFog && halfway &&
+              std::fabs(converted.layers[1].emissive[0] - own.layers[1].emissive[0]) > 0.01f,
+          "OutlandSkyColor mixes the layers' ambient colours toward the hue of the client's fog colour at their own "
+          "brightness: 1 takes that hue, 0.5 lands halfway, 0 keeps the converted colours");
+
+    FrameInputs stormwind = ContinentFrame(kEasternKingdoms, {-8565.21f, 993.46f, 104.96f}, evening, toSun, false);
+    stormwind.fogColor = frame.fogColor;
+    AuthoredFog classic = {};
+    data.Resolve(kEasternKingdoms, stormwind.camPos, evening, kClearWeather, classic);
+    const FogParams plain = BuildFogParams(stormwind, ConfigForPlace(asConverted, CameraPlace(stormwind)), &classic);
+    const FogParams tinted = BuildFogParams(stormwind, ConfigForPlace(sky, CameraPlace(stormwind)), &classic);
+    Check(std::memcmp(plain.layers, tinted.layers, sizeof(plain.layers)) == 0,
+          "the sky colour settings leave the Classic fog of the old continents as authored");
+}
+
 float BoxMean7x7(const Image& img, UINT cx, UINT cy, int ch)
 {
     double sum = 0.0;
@@ -1367,12 +2236,100 @@ void CheckOverlayKeyNames()
           "overlay key names read back as written");
 }
 
+void CheckLightProjectsOntoTheViewport()
+{
+    const D3DVIEWPORT9 offset = {10, 20, 800, 600, 0.0f, 1.0f};
+    float projection[16] = {};
+    projection[0] = 1.2f;
+    projection[5] = 2.1f;
+    projection[8] = 0.02f;
+    projection[9] = -0.03f;
+    const Vec3 toLight = Norm({0.2f, 0.3f, 0.9f});
+    const float toLightInView[3] = {toLight.x, toLight.y, toLight.z};
+    const LightOnScreen onScreen = ProjectLightOntoViewport(toLightInView, projection, offset);
+    const float ndcX = toLight.x / toLight.z * projection[0] + projection[8];
+    const float ndcY = toLight.y / toLight.z * projection[5] + projection[9];
+    const float column = offset.X + (ndcX * 0.5f + 0.5f) * offset.Width;
+    const float row = offset.Y + (0.5f - ndcY * 0.5f) * offset.Height;
+    const float sideways[3] = {1.0f, 0.0f, 0.5f * kLightInFrontViewZ};
+    const float behind[3] = {0.0f, 0.6f, -0.8f};
+    Check(onScreen.inFront && Near(onScreen.pixel[0], column) && Near(onScreen.pixel[1], row) &&
+              Near(onScreen.ndc[0], ndcX) && Near(onScreen.ndc[1], ndcY) &&
+              !ProjectLightOntoViewport(sideways, projection, offset).inFront &&
+              !ProjectLightOntoViewport(behind, projection, offset).inFront,
+          "the sun or moon projects onto the viewport where the god rays and the sun marker put it, and a light "
+          "beside or behind the camera is not in front");
+}
+
+uintptr_t ExportedGetProcAddress(const char* moduleName)
+{
+    HMODULE module = GetModuleHandleA(moduleName);
+    return module ? reinterpret_cast<uintptr_t>(GetProcAddress(module, "GetProcAddress")) : 0;
+}
+
+FARPROC WINAPI ForeignGetProcAddressHook(HMODULE module, LPCSTR name)
+{
+    return GetProcAddress(module, name);
+}
+
+bool SlotHolds(uintptr_t value, GetProcAddressSlotHolds expected)
+{
+    return vf_test_get_proc_address_slot_holds(value) == static_cast<int>(expected);
+}
+
+void CheckGetProcAddressSlotStates()
+{
+    const uintptr_t kernel32 = ExportedGetProcAddress("kernel32.dll");
+    const uintptr_t kernelBase = ExportedGetProcAddress("kernelbase.dll");
+    const uintptr_t foreign[] = {0, reinterpret_cast<uintptr_t>(&ForeignGetProcAddressHook),
+                                 engine::kGetProcAddressThunk + 1, engine::kGetProcAddressSlot};
+    bool foreignRefused = true;
+    for (uintptr_t value : foreign)
+        foreignRefused = SlotHolds(value, GetProcAddressSlotHolds::ForeignCode) && foreignRefused;
+    std::printf("     kernel32 GetProcAddress 0x%08X, KernelBase GetProcAddress 0x%08X\n",
+                static_cast<unsigned>(kernel32), static_cast<unsigned>(kernelBase));
+    Check(SlotHolds(engine::kGetProcAddressThunk, GetProcAddressSlotHolds::LoaderThunk) && kernel32 &&
+              SlotHolds(kernel32, GetProcAddressSlotHolds::ResolvedGetProcAddress) &&
+              (!kernelBase || SlotHolds(kernelBase, GetProcAddressSlotHolds::ResolvedGetProcAddress)) &&
+              foreignRefused,
+          "the GetProcAddress slot takes the filter while it holds the client's loader thunk or, when the DLL "
+          "loads after the client's first call through it, the resolved GetProcAddress, and refuses any other "
+          "address");
+}
+
+std::wstring LuxvelumDllPath()
+{
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&vf_test_get_config), &module))
+        return std::wstring();
+    wchar_t path[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameW(module, path, MAX_PATH);
+    return std::wstring(path, length);
+}
+
+void CheckTheDllStaysLoadedAfterFreeLibrary(const std::wstring& outDir)
+{
+    const std::wstring dir = FullPath(outDir + L"\\pin-check");
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring dll = LuxvelumDllPath();
+    const std::wstring copy = dir + L"\\LuxvelumPinCheck.dll";
+    const bool copied = !dll.empty() && CopyFileW(dll.c_str(), copy.c_str(), FALSE);
+    HMODULE loaded = copied ? LoadLibraryW(copy.c_str()) : nullptr;
+    if (loaded)
+        FreeLibrary(loaded);
+    Check(loaded && GetModuleHandleW(L"LuxvelumPinCheck.dll") == loaded,
+          "Luxvelum.dll pins itself while it loads, so a FreeLibrary by the loader in Wow.exe or by another tool "
+          "cannot unmap the code its hooks call");
+}
+
 void CheckSettingsSaveKeepsTheIni(const std::wstring& outDir, const std::wstring& shippedIni)
 {
     const std::wstring savedIni = FullPath(outDir + L"\\saved.ini");
-    Check(CopyFileW(shippedIni.c_str(), savedIni.c_str(), FALSE) != FALSE, "shipped LuxVelum.ini copied");
+    Check(CopyFileW(shippedIni.c_str(), savedIni.c_str(), FALSE) != FALSE, "shipped Luxvelum.ini copied");
     for (const wchar_t* removedKey : {L"LightShafts", L"WorldShadows"})
-        WritePrivateProfileStringW(L"LuxVelum", removedKey, L"0", savedIni.c_str());
+        WritePrivateProfileStringW(L"Luxvelum", removedKey, L"0", savedIni.c_str());
+    WritePrivateProfileStringW(L"Luxvelum", L"HaloOcclusion", L"1", savedIni.c_str());
     ConfigStore store;
     store.Load(NarrowPath(savedIni));
     const Config shipped = store.Get();
@@ -1381,8 +2338,10 @@ void CheckSettingsSaveKeepsTheIni(const std::wstring& outDir, const std::wstring
     shippedStore.Load(NarrowPath(shippedIni));
     const std::string shippedText = ReadText(shippedIni);
     Check(SameLiveSettings(shipped, shippedStore.Get()) && shippedText.find("LightShafts") == std::string::npos &&
-              shippedText.find("WorldShadows") == std::string::npos,
-          "the removed LightShafts and WorldShadows keys are gone from the shipped INI and ignored in an old one");
+              shippedText.find("WorldShadows") == std::string::npos &&
+              shippedText.find("HaloOcclusion") == std::string::npos,
+          "the removed LightShafts, WorldShadows and HaloOcclusion keys are gone from the shipped INI and ignored in "
+          "an old one, HaloOcclusion=1 included");
 
     Config edited = shipped;
     edited.enable = false;
@@ -1408,10 +2367,11 @@ void CheckSettingsSaveKeepsTheIni(const std::wstring& outDir, const std::wstring
               r.localLights == edited.localLights && r.enable == shipped.enable && r.overlay == shipped.overlay,
           "saved settings reload unchanged and the restart-only keys stay as they were");
     const std::string text = ReadText(savedIni);
-    Check(text.rfind("; LuxVelum settings.", 0) == 0 && text.find("\nDensity=2.5") != std::string::npos &&
-              text.find("\nHaze=1.0") != std::string::npos && text.find("\nEnable=1") != std::string::npos &&
+    Check(text.rfind("; Luxvelum settings.", 0) == 0 && text.find("\nDensity=2.5") != std::string::npos &&
+              text.find("\nHaze=0.4") != std::string::npos && text.find("\nEnable=1") != std::string::npos &&
               text.find("; Global density multiplier") != std::string::npos &&
-              text.find("\nLightShafts=0") != std::string::npos && text.find("\nWorldShadows=0") != std::string::npos,
+              text.find("\nLightShafts=0") != std::string::npos && text.find("\nWorldShadows=0") != std::string::npos &&
+              text.find("\nHaloOcclusion=1") != std::string::npos,
           "saving rewrites only the changed lines and keeps the comments and unknown keys");
 
     Config scratch = store.Get();
@@ -1423,7 +2383,7 @@ void CheckSettingsSaveKeepsTheIni(const std::wstring& outDir, const std::wstring
     Config typed = store.Get();
     typed.haze = 1.23456f;
     store.Apply(typed);
-    WritePrivateProfileStringW(L"LuxVelum", L"Quality", L"1", savedIni.c_str());
+    WritePrivateProfileStringW(L"Luxvelum", L"Quality", L"1", savedIni.c_str());
     const bool mergedSave = store.Save();
     ConfigStore afterMerge;
     afterMerge.Load(NarrowPath(savedIni));
@@ -1432,6 +2392,68 @@ void CheckSettingsSaveKeepsTheIni(const std::wstring& outDir, const std::wstring
     Check(store.Get().haze == afterMerge.Get().haze && !store.HasUnsavedChanges() &&
               ReadText(savedIni).find("\nHaze=1.235") != std::string::npos,
           "Save records the value it wrote, rounded like the INI");
+}
+
+void CheckZoneHaloTable(const std::wstring& outDir)
+{
+    const std::wstring file = FullPath(outDir + L"\\zone-halo.ini");
+    DeleteFileW(file.c_str());
+    ZoneHaloTable table;
+    table.Load(NarrowPath(file));
+    table.Edit(kRedridgeMountains, {0.6f, 1.3f});
+    table.Edit(kTheBarrens, {9.0f, -1.0f});
+    const bool saved = table.Save(kRedridgeMountains, "Redridge Mountains") && table.Save(kTheBarrens, "The Barrens");
+    ZoneHaloTable reloaded;
+    reloaded.Load(NarrowPath(file));
+    const ZoneHaloFactors redridge = reloaded.Factors(kRedridgeMountains);
+    const ZoneHaloFactors barrens = reloaded.Factors(kTheBarrens);
+    const ZoneHaloFactors durotar = reloaded.Factors(kDurotar);
+    wchar_t name[kZoneNameSize] = {};
+    GetPrivateProfileStringW(L"Zones", L"44", L"", name, kZoneNameSize, file.c_str());
+    std::printf("     reloaded: Redridge sun %.2f moon %.2f, Barrens sun %.2f moon %.2f, Durotar %.2f %.2f\n",
+                redridge.sun, redridge.moon, barrens.sun, barrens.moon, durotar.sun, durotar.moon);
+    Check(saved && Near(redridge.sun, 0.6f) && Near(redridge.moon, 1.3f) && Near(barrens.sun, kZoneHaloMax) &&
+              Near(barrens.moon, 0.0f) && Near(durotar.sun, 1.0f) && Near(durotar.moon, 1.0f) &&
+              reloaded.Count() == 2 && std::wstring(name) == L"Redridge Mountains",
+          "Luxvelum-zones.ini keeps each zone's sun and moon halo by zone id with its name, clamps them to "
+          "0..4, and a zone it does not list keeps 1");
+    const bool forgotten = reloaded.Forget(kRedridgeMountains);
+    ZoneHaloTable afterReset;
+    afterReset.Load(NarrowPath(file));
+    Check(forgotten && !afterReset.Listed(kRedridgeMountains) && afterReset.Listed(kTheBarrens) &&
+              Near(afterReset.Factors(kRedridgeMountains).sun, 1.0f),
+          "resetting a zone removes it from Luxvelum-zones.ini and leaves the others");
+}
+
+void CheckRegionLocalLightsSetting(const std::wstring& outDir, const std::wstring& shippedIni)
+{
+    ConfigStore shipped;
+    shipped.Load(NarrowPath(shippedIni));
+    const Config& s = shipped.Get();
+    std::printf("     shipped region local lights: Azeroth %.2f, Outland %.2f, Northrend %.2f, TBC start %.2f\n",
+                s.azerothLocalLights, s.outlandLocalLights, s.northrendLocalLights, s.tbcStartLocalLights);
+    Check(s.azerothLocalLights == 1.0f && s.outlandLocalLights == 4.0f && s.northrendLocalLights == 8.0f &&
+              s.tbcStartLocalLights == 2.5f && s.tbcStartDensity == 1.0f && s.tbcStartSkyColor == 0.5f &&
+              ReadText(shippedIni).find("; Local light intensity per region, 0..128 (the settings window's sliders "
+                                        "reach 96),") != std::string::npos &&
+              kRegionLocalLightsSliderMax == 96.0f && kRegionLocalLightsMax == 128.0f,
+          "the shipped INI starts Outland's local lights at 4, the starting zones' at 2.5, Northrend's at 8 and "
+          "Azeroth's at 1, and documents their range 0..128 and the sliders' 96");
+
+    const std::wstring savedIni = FullPath(outDir + L"\\region-local-lights.ini");
+    CopyFileW(shippedIni.c_str(), savedIni.c_str(), FALSE);
+    WritePrivateProfileStringW(L"Luxvelum", L"AzerothLocalLights", L"12", savedIni.c_str());
+    WritePrivateProfileStringW(L"Luxvelum", L"OutlandLocalLights", L"96", savedIni.c_str());
+    WritePrivateProfileStringW(L"Luxvelum", L"NorthrendLocalLights", L"200", savedIni.c_str());
+    WritePrivateProfileStringW(L"Luxvelum", L"TBCStartLocalLights", L"300", savedIni.c_str());
+    ConfigStore written;
+    written.Load(NarrowPath(savedIni));
+    const Config& w = written.Get();
+    std::printf("     written 12, 96 and 200: Azeroth %.2f, Outland %.2f, Northrend %.2f\n", w.azerothLocalLights,
+                w.outlandLocalLights, w.northrendLocalLights);
+    Check(w.azerothLocalLights == 12.0f && w.outlandLocalLights == 96.0f && w.northrendLocalLights == 128.0f &&
+              w.tbcStartLocalLights == 128.0f,
+          "region local lights read from the INI up to 128 and clamp to 128 above it");
 }
 
 bool WriteText(const std::wstring& path, const std::string& text)
@@ -1443,16 +2465,16 @@ bool WriteText(const std::wstring& path, const std::string& text)
     return std::fclose(f) == 0 && written;
 }
 
-constexpr const char* kLuxVelumSectionLine = "[LuxVelum]";
+constexpr const char* kLuxvelumSectionLine = "[Luxvelum]";
 
 bool WriteEarlierIni(const std::wstring& shippedIni, const std::wstring& path, const char* sectionLine,
                      const wchar_t* section, const wchar_t* density)
 {
     std::string earlier = ReadText(shippedIni);
-    const size_t at = earlier.find(kLuxVelumSectionLine);
+    const size_t at = earlier.find(kLuxvelumSectionLine);
     if (at == std::string::npos)
         return false;
-    earlier.replace(at, std::strlen(kLuxVelumSectionLine), sectionLine);
+    earlier.replace(at, std::strlen(kLuxvelumSectionLine), sectionLine);
     return WriteText(path, earlier) && WritePrivateProfileStringW(section, L"Density", density, path.c_str()) != FALSE;
 }
 
@@ -1460,9 +2482,21 @@ std::wstring FreshTakeoverDirectory(const std::wstring& outDir, const wchar_t* n
 {
     const std::wstring dir = FullPath(outDir + L"\\" + name);
     CreateDirectoryW(dir.c_str(), nullptr);
-    for (const wchar_t* file : {L"\\LuxVelum.ini", L"\\Luxveil.ini", L"\\CoAVolFog.ini"})
+    for (const wchar_t* file :
+         {L"\\WTF\\Luxvelum.ini", L"\\Luxvelum.ini", L"\\Luxveil.ini", L"\\CoAVolFog.ini"})
         DeleteFileW((dir + file).c_str());
     return dir;
+}
+
+std::wstring SettingsIn(const std::wstring& dir)
+{
+    return dir + L"\\WTF\\Luxvelum.ini";
+}
+
+const char* TakeOverEarlierSettingsIn(const std::wstring& dir)
+{
+    const std::string clientFolder = NarrowPath(dir + L"\\");
+    return AdoptEarlierSettings(clientFolder, ClientInstallPaths(clientFolder).ini);
 }
 
 void CheckEarlierSettingsAreTakenOver(const std::wstring& outDir, const std::wstring& shippedIni)
@@ -1472,41 +2506,289 @@ void CheckEarlierSettingsAreTakenOver(const std::wstring& outDir, const std::wst
 
     const std::wstring dir = FreshTakeoverDirectory(outDir, L"takeover");
     const std::wstring coaVolFogIni = dir + L"\\CoAVolFog.ini";
-    const std::wstring luxvelumIni = dir + L"\\LuxVelum.ini";
+    const std::wstring luxvelumIni = SettingsIn(dir);
     Check(WriteEarlierIni(shippedIni, coaVolFogIni, "[coavolfog]", L"CoAVolFog", L"2.5"),
           "an old CoAVolFog.ini written");
     const std::string before = ReadText(coaVolFogIni);
-    const char* adopted = AdoptEarlierSettings(NarrowPath(dir + L"\\"));
+    const char* adopted = TakeOverEarlierSettingsIn(dir);
     ConfigStore store;
     store.Load(NarrowPath(luxvelumIni));
     const std::string taken = ReadText(luxvelumIni);
     Config expected = shipped.Get();
     expected.density = 2.5f;
     Check(adopted && std::strcmp(adopted, "CoAVolFog.ini") == 0 && SameLiveSettings(store.Get(), expected) &&
-              taken.find(kLuxVelumSectionLine) != std::string::npos && taken.find("[coavolfog]") == std::string::npos &&
+              taken.find(kLuxvelumSectionLine) != std::string::npos && taken.find("[coavolfog]") == std::string::npos &&
               taken.find("; Global density multiplier") != std::string::npos && ReadText(coaVolFogIni) == before,
-          "without a LuxVelum.ini the settings of an old CoAVolFog.ini are taken over, comments and all, under the "
-          "LuxVelum section, and the old file stays as it was");
+          "without a WTF\\Luxvelum.ini the settings of an old CoAVolFog.ini beside Luxvelum.dll are taken over into "
+          "WTF, comments and all, under the Luxvelum section, and the old file stays as it was");
 
     WritePrivateProfileStringW(L"CoAVolFog", L"Density", L"3", coaVolFogIni.c_str());
-    const char* again = AdoptEarlierSettings(NarrowPath(dir + L"\\"));
+    const char* again = TakeOverEarlierSettingsIn(dir);
     const std::wstring emptyDir = FreshTakeoverDirectory(outDir, L"takeover-none");
-    const char* fromNothing = AdoptEarlierSettings(NarrowPath(emptyDir + L"\\"));
+    const char* fromNothing = TakeOverEarlierSettingsIn(emptyDir);
     Check(!again && ReadText(luxvelumIni) == taken && !fromNothing &&
-              GetFileAttributesW((emptyDir + L"\\LuxVelum.ini").c_str()) == INVALID_FILE_ATTRIBUTES,
-          "an existing LuxVelum.ini is never overwritten, and without an earlier INI none is made");
+              GetFileAttributesW(SettingsIn(emptyDir).c_str()) == INVALID_FILE_ATTRIBUTES,
+          "an existing Luxvelum.ini is never overwritten, and without an earlier INI none is made");
 
     const std::wstring both = FreshTakeoverDirectory(outDir, L"takeover-both");
     const bool written = WriteEarlierIni(shippedIni, both + L"\\CoAVolFog.ini", "[CoAVolFog]", L"CoAVolFog", L"2.5") &&
                          WriteEarlierIni(shippedIni, both + L"\\Luxveil.ini", "[Luxveil]", L"Luxveil", L"1.75");
-    const char* newest = AdoptEarlierSettings(NarrowPath(both + L"\\"));
+    const char* newest = TakeOverEarlierSettingsIn(both);
     ConfigStore fromLuxveil;
-    fromLuxveil.Load(NarrowPath(both + L"\\LuxVelum.ini"));
+    fromLuxveil.Load(NarrowPath(SettingsIn(both)));
     Check(written && newest && std::strcmp(newest, "Luxveil.ini") == 0 && fromLuxveil.Get().density == 1.75f &&
-              ReadText(both + L"\\LuxVelum.ini").find("[Luxveil]") == std::string::npos,
+              ReadText(SettingsIn(both)).find("[Luxveil]") == std::string::npos,
           "a Luxveil.ini from TEST Build-24-11 is taken over before an older CoAVolFog.ini");
 }
 
+constexpr const char* kShippedDensityLine = "\nDensity=1";
+constexpr const char* kTakenOverDensityLine = "\nDensity=2.5";
+constexpr float kTakenOverDensity = 2.5f;
+constexpr const char* kUtf8Bom = "\xEF\xBB\xBF";
+constexpr const char* kUtf16LeBom = "\xFF\xFE";
+constexpr const char* kPlayerComment = "; Nebel f\xC3\xBCr Elwynn\r\n";
+
+std::string EarlierIniText(const std::wstring& shippedIni, const char* sectionLine)
+{
+    std::string text = ReadText(shippedIni);
+    const size_t at = text.find(kLuxvelumSectionLine);
+    const size_t density = text.find(kShippedDensityLine);
+    if (at == std::string::npos || density == std::string::npos || density < at)
+        return std::string();
+    text.replace(density, std::strlen(kShippedDensityLine), kTakenOverDensityLine);
+    text.replace(at, std::strlen(kLuxvelumSectionLine), sectionLine);
+    return text;
+}
+
+std::string Utf16Le(const std::string& utf8)
+{
+    const int length = static_cast<int>(utf8.size());
+    const int units = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), length, nullptr, 0);
+    if (units <= 0)
+        return std::string();
+    std::wstring wide(units, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), length, &wide[0], units);
+    return std::string(reinterpret_cast<const char*>(wide.data()), wide.size() * sizeof(wchar_t));
+}
+
+struct TakenOver
+{
+    std::string from;
+    bool written = false;
+    std::string text;
+    Config settings;
+
+    bool From(const char* ini) const { return written && from == ini; }
+};
+
+TakenOver TakeOverIn(const std::wstring& dir)
+{
+    TakenOver taken;
+    const char* from = TakeOverEarlierSettingsIn(dir);
+    taken.from = from ? from : "";
+    const std::wstring ini = SettingsIn(dir);
+    taken.written = GetFileAttributesW(ini.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!taken.written)
+        return taken;
+    taken.text = ReadText(ini);
+    ConfigStore store;
+    store.Load(NarrowPath(ini));
+    taken.settings = store.Get();
+    return taken;
+}
+
+void CheckEarlierSettingsAreTakenOverWhateverTheirShape(const std::wstring& outDir, const std::wstring& shippedIni)
+{
+    ConfigStore shipped;
+    shipped.Load(NarrowPath(shippedIni));
+    Config expected = shipped.Get();
+    expected.density = kTakenOverDensity;
+
+    const std::wstring trailing = FreshTakeoverDirectory(outDir, L"takeover-trailing-text");
+    WriteText(trailing + L"\\CoAVolFog.ini", EarlierIniText(shippedIni, "[CoAVolFog] ; mine"));
+    const TakenOver fromTrailing = TakeOverIn(trailing);
+    Check(fromTrailing.From("CoAVolFog.ini") && SameLiveSettings(fromTrailing.settings, expected) &&
+              fromTrailing.text.find("\n[Luxvelum] ; mine") != std::string::npos,
+          "a CoAVolFog.ini whose header line goes on after its ] is taken over, the rest of the line kept");
+
+    const std::wstring utf8 = FreshTakeoverDirectory(outDir, L"takeover-utf8-bom");
+    WriteText(utf8 + L"\\CoAVolFog.ini", std::string(kUtf8Bom) + "[CoAVolFog]\r\nDensity=2.5\r\n");
+    const TakenOver fromUtf8 = TakeOverIn(utf8);
+    Check(fromUtf8.From("CoAVolFog.ini") && fromUtf8.settings.density == kTakenOverDensity &&
+              fromUtf8.text.rfind(kLuxvelumSectionLine, 0) == 0,
+          "a CoAVolFog.ini saved as UTF-8 with its header on the first line is taken over, and Luxvelum.ini starts "
+          "with its header, not with the byte order mark");
+
+    const std::wstring utf16 = FreshTakeoverDirectory(outDir, L"takeover-utf16");
+    WriteText(utf16 + L"\\CoAVolFog.ini",
+              kUtf16LeBom + Utf16Le(kPlayerComment + EarlierIniText(shippedIni, "[CoAVolFog]")));
+    const TakenOver fromUtf16 = TakeOverIn(utf16);
+    Check(fromUtf16.From("CoAVolFog.ini") && SameLiveSettings(fromUtf16.settings, expected) &&
+              fromUtf16.text.rfind(kUtf16LeBom + Utf16Le(kPlayerComment), 0) == 0 &&
+              fromUtf16.text.find(Utf16Le(kLuxvelumSectionLine)) != std::string::npos,
+          "a CoAVolFog.ini saved as Unicode is taken over and stays Unicode, its comments unchanged");
+
+    const std::wstring sectionless = FreshTakeoverDirectory(outDir, L"takeover-sectionless");
+    WriteText(sectionless + L"\\CoAVolFog.ini", "[Settings]\r\nDensity=2.5\r\n");
+    const TakenOver fromSectionless = TakeOverIn(sectionless);
+    Check(fromSectionless.from.empty() && !fromSectionless.written,
+          "an earlier INI without its section is not taken over, and no Luxvelum.ini is made from it");
+
+    const std::wstring next = FreshTakeoverDirectory(outDir, L"takeover-next");
+    WriteText(next + L"\\Luxveil.ini", "; Luxveil\r\n[Fog]\r\nDensity=1.75\r\n");
+    WriteText(next + L"\\CoAVolFog.ini", EarlierIniText(shippedIni, "[CoAVolFog]"));
+    const TakenOver fromNext = TakeOverIn(next);
+    Check(fromNext.From("CoAVolFog.ini") && SameLiveSettings(fromNext.settings, expected),
+          "a Luxveil.ini without its section is passed over for the CoAVolFog.ini behind it");
+}
+
+constexpr const char* kCamelCaseSectionLine = "[LuxVelum]";
+
+bool IsFolder(const std::wstring& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::wstring FreshClientFolder(const std::wstring& outDir, const wchar_t* name)
+{
+    const std::wstring dir = FreshTakeoverDirectory(outDir, name);
+    for (const wchar_t* file : {L"\\Logs\\Luxvelum.log", L"\\Data\\Luxvelum\\fogdata.bin",
+                                L"\\Data\\Luxvelum\\waterdata.bin", L"\\fogdata.bin", L"\\waterdata.bin"})
+        DeleteFileW((dir + file).c_str());
+    for (const wchar_t* folder : {L"\\Logs", L"\\WTF", L"\\Data\\Luxvelum", L"\\Data"})
+        if (!RemoveDirectoryW((dir + folder).c_str()))
+            DeleteFileW((dir + folder).c_str());
+    return dir;
+}
+
+void CheckZoneHaloOwnOverShipped(const std::wstring& outDir)
+{
+    constexpr int kDuskwood = 10;
+    const std::wstring shippedFile = FullPath(outDir + L"\\zones-shipped.ini");
+    const std::wstring ownFile = FullPath(outDir + L"\\zones-own.ini");
+    const std::string shippedText = "[SunHalo]\n17=0.25\n10=0.65\n[MoonHalo]\n17=1.00\n10=1.00\n";
+    DeleteFileW(ownFile.c_str());
+    const bool written = WriteText(shippedFile, shippedText) &&
+                         WriteText(ownFile, "[SunHalo]\n10=0.80\n[Density]\n10=1.75\n");
+    ZoneHaloBook book;
+    book.Load(NarrowPath(shippedFile), NarrowPath(ownFile));
+    book.Advance(kTheBarrens, "The Barrens", 1.0);
+    const ZoneHaloView barrens = book.Current();
+    book.Advance(kDuskwood, "Duskwood", 1.016);
+    const ZoneHaloView duskwood = book.Current();
+    book.Advance(kDurotar, "Durotar", 1.032);
+    const ZoneHaloView durotar = book.Current();
+    std::printf("     shipped Barrens %.2f, own Duskwood %.2f over shipped 0.65, unlisted Durotar %.2f\n",
+                barrens.factors.sun, duskwood.factors.sun, durotar.factors.sun);
+    Check(written && Near(barrens.factors.sun, 0.25f) && barrens.source == ZoneHaloSource::Shipped &&
+              Near(duskwood.factors.sun, 0.8f) && duskwood.source == ZoneHaloSource::Own &&
+              Near(durotar.factors.sun, 1.0f) && durotar.source == ZoneHaloSource::Unlisted,
+          "a zone takes the player's own halo from WTF\\Luxvelum-zones.ini, else the shipped one from "
+          "Data\\Luxvelum\\zones.ini, else 1");
+    Check(Near(duskwood.factors.density, 1.75f) && Near(barrens.factors.density, 1.0f) &&
+              Near(durotar.factors.density, 1.0f),
+          "a zone's fog density comes from the [Density] section the same way, 1 where no file lists it");
+
+    book.Advance(kTheBarrens, "The Barrens", 2.0);
+    book.Edit({0.5f, 1.0f, 1.25f});
+    const bool saved = book.SaveCurrent();
+    book.Advance(kDuskwood, "Duskwood", 3.0);
+    const bool forgotten = book.ForgetCurrent();
+    const ZoneHaloView afterReset = book.Current();
+    ZoneHaloTable own;
+    own.Load(NarrowPath(ownFile));
+    std::printf("     own file after an edit in the Barrens and a reset in Duskwood: Barrens %.2f, Duskwood %s; "
+                "Duskwood back to %.2f\n",
+                own.Factors(kTheBarrens).sun, own.Listed(kDuskwood) ? "listed" : "not listed",
+                afterReset.factors.sun);
+    Check(saved && forgotten && Near(own.Factors(kTheBarrens).sun, 0.5f) &&
+              Near(own.Factors(kTheBarrens).density, 1.25f) && !own.Listed(kDuskwood) &&
+              Near(afterReset.factors.sun, 0.65f) && afterReset.source == ZoneHaloSource::Shipped &&
+              ReadText(shippedFile) == shippedText,
+          "the settings window writes and resets only the player's own halos, a reset falls back to the shipped "
+          "halo, and the shipped file is never written, so a release can replace it without losing the player's "
+          "edits");
+}
+
+void CheckClientInstallLayout(const std::wstring& outDir, const std::wstring& shippedIni)
+{
+    const std::wstring fresh = FreshClientFolder(outDir, L"client-fresh");
+    const std::string freshFolder = NarrowPath(fresh + L"\\");
+    const InstallPaths paths = ClientInstallPaths(freshFolder);
+    std::printf("     fresh client folder: log %s, settings %s, fog data %s, water data %s\n", paths.log.c_str(),
+                paths.ini.c_str(), paths.fogData.c_str(), paths.waterData.c_str());
+    Check(paths.log == freshFolder + "Logs\\Luxvelum.log" && paths.ini == freshFolder + "WTF\\Luxvelum.ini" &&
+              paths.fogData == freshFolder + "Data\\Luxvelum\\fogdata.bin" &&
+              paths.waterData == freshFolder + "Data\\Luxvelum\\waterdata.bin" &&
+              paths.zoneHalo == freshFolder + "WTF\\Luxvelum-zones.ini" &&
+              paths.shippedZoneHalo == freshFolder + "Data\\Luxvelum\\zones.ini" && IsFolder(fresh + L"\\Logs") &&
+              IsFolder(fresh + L"\\WTF"),
+          "in the client folder the log goes into Logs and the settings and zone halos into WTF, both made when "
+          "missing, and the fog and water data come from Data\\Luxvelum");
+
+    const std::wstring earlier = FreshClientFolder(outDir, L"client-earlier-install");
+    const std::string earlierFolder = NarrowPath(earlier + L"\\");
+    WriteText(earlier + L"\\fogdata.bin", "fog");
+    WriteText(earlier + L"\\waterdata.bin", "water");
+    const InstallPaths beside = ClientInstallPaths(earlierFolder);
+    CreateDirectoryW((earlier + L"\\Data").c_str(), nullptr);
+    CreateDirectoryW((earlier + L"\\Data\\Luxvelum").c_str(), nullptr);
+    WriteText(earlier + L"\\Data\\Luxvelum\\fogdata.bin", "fog");
+    const InstallPaths partly = ClientInstallPaths(earlierFolder);
+    Check(beside.fogData == earlierFolder + "fogdata.bin" && beside.waterData == earlierFolder + "waterdata.bin" &&
+              partly.fogData == earlierFolder + "Data\\Luxvelum\\fogdata.bin" &&
+              partly.waterData == earlierFolder + "waterdata.bin",
+          "an earlier install's fogdata.bin and waterdata.bin beside Luxvelum.dll are read there until "
+          "Data\\Luxvelum holds them, and each file there wins on its own");
+
+    const std::wstring blocked = FreshClientFolder(outDir, L"client-blocked");
+    const std::string blockedFolder = NarrowPath(blocked + L"\\");
+    WriteText(blocked + L"\\Logs", "");
+    WriteText(blocked + L"\\WTF", "");
+    const InstallPaths stayed = ClientInstallPaths(blockedFolder);
+    Check(stayed.log == blockedFolder + "Luxvelum.log" && stayed.ini == blockedFolder + "Luxvelum.ini",
+          "where Logs or WTF cannot be made, the log and the settings stay beside Luxvelum.dll as before");
+
+    const std::wstring upgraded = FreshClientFolder(outDir, L"client-upgrade");
+    const std::wstring besideIni = upgraded + L"\\Luxvelum.ini";
+    const bool written =
+        WriteEarlierIni(shippedIni, besideIni, kCamelCaseSectionLine, L"LuxVelum", L"2.5") &&
+        WriteEarlierIni(shippedIni, upgraded + L"\\Luxveil.ini", "[Luxveil]", L"Luxveil", L"1.75");
+    const std::string before = ReadText(besideIni);
+    const TakenOver fromBeside = TakeOverIn(upgraded);
+    Check(written && fromBeside.From("Luxvelum.ini") && fromBeside.settings.density == kTakenOverDensity &&
+              fromBeside.text.find(kLuxvelumSectionLine) != std::string::npos &&
+              fromBeside.text.find(kCamelCaseSectionLine) == std::string::npos &&
+              ReadText(besideIni) == before,
+          "a Luxvelum.ini beside Luxvelum.dll, also one with the [LuxVelum] section of the builds spelt LuxVelum, is "
+          "taken over into WTF before a Luxveil.ini, and stays as it was");
+}
+
+std::string LuxvelumDllFolder()
+{
+    char path[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameA(GetModuleHandleA("Luxvelum.dll"), path, MAX_PATH);
+    const std::string module(path, length);
+    return module.substr(0, module.find_last_of("\\/") + 1);
+}
+
+void CheckTheDllUsesTheClientFolders()
+{
+    const std::string folder = LuxvelumDllFolder();
+    const std::string log = vf_test_log_path();
+    wchar_t logPath[MAX_PATH] = {};
+    MultiByteToWideChar(CP_ACP, 0, log.c_str(), -1, logPath, MAX_PATH);
+    const std::string started = std::string("Luxvelum ") + kLuxvelumVersion + " (" + kLuxvelumBuildId +
+                                ") loaded from " + folder +
+                                "; settings " + folder + "WTF\\Luxvelum.ini, fog data " + folder +
+                                "Data\\Luxvelum\\fogdata.bin, water data " + folder + "Data\\Luxvelum\\waterdata.bin";
+    std::printf("     Luxvelum.dll in %s writes %s\n", folder.c_str(), log.c_str());
+    Check(!folder.empty() && log.rfind(folder + "Logs\\Luxvelum", 0) == 0 &&
+              ReadText(logPath).find(started) != std::string::npos,
+          "Luxvelum.dll writes its log into the Logs folder beside it, names its build there and reads "
+          "WTF\\Luxvelum.ini, Data\\Luxvelum\\fogdata.bin and Data\\Luxvelum\\waterdata.bin there");
+}
 
 constexpr const char* kVersionDllExports[] = {
     "GetFileVersionInfoA",       "GetFileVersionInfoByHandle", "GetFileVersionInfoExA",
@@ -1548,20 +2830,22 @@ void CheckTheVersionDllLoader()
     const std::wstring probe = system + L"\\kernel32.dll";
     const DWORD throughLoader = VersionInfoSizeThrough(loader, probe);
     const DWORD fromSystem = VersionInfoSizeThrough(systemCopy, probe);
-    const bool anchored = GetProcAddress(GetModuleHandleW(L"LuxVelum.dll"), "vf_loader_anchor") != nullptr;
+    const bool anchored = GetProcAddress(GetModuleHandleW(L"Luxvelum.dll"), "vf_loader_anchor") != nullptr;
     std::printf("     version.dll beside the harness: %d of %zu exports, kernel32.dll version info %lu bytes through "
-                "it and %lu through the system copy, LuxVelum.dll %s vf_loader_anchor\n",
+                "it and %lu through the system copy, Luxvelum.dll %s vf_loader_anchor\n",
                 exported, std::size(kVersionDllExports), throughLoader, fromSystem,
                 anchored ? "exports" : "lacks");
     Check(loader && loader != systemCopy && exported == static_cast<int>(std::size(kVersionDllExports)) &&
               fromSystem > 0 && throughLoader == fromSystem && anchored,
           "the optional version.dll loader exports all 17 functions of the system copy and forwards to it, and "
-          "LuxVelum.dll exports the vf_loader_anchor it imports");
+          "Luxvelum.dll exports the vf_loader_anchor it imports");
 }
 
 struct ClientInput
 {
     int keyDowns = 0;
+    int keyUps = 0;
+    int characters = 0;
     int mouseDowns = 0;
     int mouseUps = 0;
     int mouseMoves = 0;
@@ -1573,6 +2857,10 @@ LRESULT CALLBACK ClientWindowProc(HWND window, UINT msg, WPARAM wParam, LPARAM l
 {
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
         ++g_clientInput.keyDowns;
+    if (msg == WM_KEYUP || msg == WM_SYSKEYUP)
+        ++g_clientInput.keyUps;
+    if (msg == WM_CHAR)
+        ++g_clientInput.characters;
     if (msg == WM_LBUTTONDOWN)
         ++g_clientInput.mouseDowns;
     if (msg == WM_LBUTTONUP)
@@ -1592,11 +2880,32 @@ void HoldModifiers(bool ctrl, bool shift, bool alt)
     SetKeyboardState(keys);
 }
 
+LPARAM KeyPressedParameter(unsigned virtualKey)
+{
+    return static_cast<LPARAM>(kKeyRepeatCountOne | (MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC) << 16));
+}
+
+LPARAM KeyReleasedParameter(unsigned virtualKey)
+{
+    return static_cast<LPARAM>(static_cast<UINT>(KeyPressedParameter(virtualKey)) | kKeyReleaseTransition);
+}
+
 void PressKey(HWND window, unsigned virtualKey)
 {
-    const UINT pressed = kKeyRepeatCountOne | (MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC) << 16);
-    SendMessageW(window, WM_KEYDOWN, virtualKey, static_cast<LPARAM>(pressed));
-    SendMessageW(window, WM_KEYUP, virtualKey, static_cast<LPARAM>(pressed | kKeyReleaseTransition));
+    SendMessageW(window, WM_KEYDOWN, virtualKey, KeyPressedParameter(virtualKey));
+    SendMessageW(window, WM_KEYUP, virtualKey, KeyReleasedParameter(virtualKey));
+}
+
+void HoldHotkeyDown(HWND window, const Hotkey& key)
+{
+    HoldModifiers(key.ctrl, key.shift, key.alt);
+    SendMessageW(window, WM_KEYDOWN, key.virtualKey, KeyPressedParameter(key.virtualKey));
+    HoldModifiers(false, false, false);
+}
+
+void TypeCharacter(HWND window, unsigned virtualKey, wchar_t character)
+{
+    SendMessageW(window, WM_CHAR, character, KeyPressedParameter(virtualKey));
 }
 
 void PressHotkey(HWND window, const Hotkey& key)
@@ -1671,6 +2980,43 @@ void CheckOverlayInput(Harness& h)
           "with Overlay=0 the overlay key reaches the client");
     Config on = {};
     vf_test_set_config(&on);
+    PressHotkey(h.window, key);
+    const bool reopened = vf_test_overlay_visible() == 1;
+    PressHotkey(h.window, key);
+    Check(reopened && vf_test_overlay_visible() == 0 && g_clientInput.keyDowns == 2,
+          "with Overlay set back to 1 while the game runs the overlay key opens and closes the overlay again, "
+          "without a restart");
+}
+
+void CheckHotkeyCharactersSwallowedOnlyWhileTheHotkeyIsTyped(Harness& h)
+{
+    const Hotkey key = kDefaultOverlayHotkey;
+    g_clientInput = {};
+    HoldHotkeyDown(h.window, key);
+    TypeCharacter(h.window, key.virtualKey, kHotkeyCharacter);
+    const int hotkeyCharacters = g_clientInput.characters;
+    SendMessageW(h.window, WM_KILLFOCUS, 0, 0);
+    TypeCharacter(h.window, 'W', L'w');
+    std::printf("     characters the client saw: %d for the overlay key, %d typed after the focus left with it held\n",
+                hotkeyCharacters, g_clientInput.characters - hotkeyCharacters);
+    Check(vf_test_overlay_visible() == 1 && hotkeyCharacters == 0 && g_clientInput.characters == 1,
+          "the overlay key's own character is swallowed, but once the focus leaves while the key is held, typed "
+          "characters reach the client again");
+    PressHotkey(h.window, key);
+
+    g_clientInput = {};
+    HoldHotkeyDown(h.window, key);
+    SendMessageW(h.window, WM_KEYDOWN, 'W', KeyPressedParameter('W'));
+    TypeCharacter(h.window, 'W', L'w');
+    SendMessageW(h.window, WM_KEYUP, 'W', KeyReleasedParameter('W'));
+    SendMessageW(h.window, WM_KEYUP, key.virtualKey, KeyReleasedParameter(key.virtualKey));
+    const bool openWhileHeld = vf_test_overlay_visible() == 1;
+    const ClientInput whileHeld = g_clientInput;
+    PressHotkey(h.window, key);
+    Check(openWhileHeld && whileHeld.characters == 1 && whileHeld.keyDowns == 1 && whileHeld.keyUps == 1 &&
+              vf_test_overlay_visible() == 0,
+          "a key pressed while the overlay key is held reaches the client with its character, and the overlay "
+          "key's release still does not");
 }
 
 void DragAcross(HWND window, LPARAM from, LPARAM to)
@@ -1913,17 +3259,25 @@ void CheckSettingsWindowKeepsItsSize(Harness& h, const PanelRect& expected, cons
 #include "fog_integration_checks.h"
 #include "local_lights_checks.h"
 #include "local_light_stabiliser_checks.h"
+#include "twin_light_checks.h"
 #include "client_light_stay_checks.h"
+#include "fog_data_choice_checks.h"
+#include "dxvk_vendor_checks.h"
+#include "client_map_checks.h"
+#include "camera_focus_checks.h"
 #include "noise_variation_checks.h"
 #include "classic_phase_checks.h"
 #include "march_layer_checks.h"
+#include "celestial_shadow_checks.h"
 #include "local_light_gpu_checks.h"
 #include "silhouette_quality_checks.h"
 #include "authored_noise_checks.h"
 #include "grazing_upsample_checks.h"
 #include "god_ray_quality_checks.h"
+#include "display_dither_checks.h"
 #include "temporal_quality_checks.h"
 #include "runtime_quality_checks.h"
+#include "god_ray_shaft_checks.h"
 #include "lighting_history_checks.h"
 #include "runtime_cost_checks.h"
 #include "water_data_checks.h"
@@ -1941,6 +3295,153 @@ void CheckSettingsWindowKeepsItsSize(Harness& h, const PanelRect& expected, cons
 #include "transparent_fog_checks.h"
 #include "early_composite_look_checks.h"
 #include "multisampling_checks.h"
+#include "device_creation_checks.h"
+#include "luxvelum_switch_checks.h"
+
+constexpr unsigned long kSecondClientProcessId = 4242;
+constexpr int kLastLogSlot = 8;
+
+std::string WrittenAndClosed(LogFile& log, const char* line)
+{
+    if (!log.file)
+        return std::string();
+    std::fputs(line, log.file);
+    std::fclose(log.file);
+    log.file = nullptr;
+    return line;
+}
+
+std::string WrittenAndKeptOpen(LogFile& log, const char* line)
+{
+    if (!log.file)
+        return std::string();
+    std::fputs(line, log.file);
+    std::fflush(log.file);
+    return line;
+}
+
+void CloseLogs(std::vector<LogFile>& logs)
+{
+    for (LogFile& log : logs)
+        if (log.file)
+            std::fclose(log.file);
+    logs.clear();
+}
+
+std::vector<std::wstring> LogFilesIn(const std::wstring& folder)
+{
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW found = {};
+    const HANDLE search = FindFirstFileW((folder + L"\\*.log").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE)
+        return names;
+    do
+        names.push_back(found.cFileName);
+    while (FindNextFileW(search, &found));
+    FindClose(search);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::wstring EmptyLogFolder(const std::wstring& outDir, const wchar_t* name)
+{
+    const std::wstring folder = FullPath(outDir + L"\\" + name);
+    CreateDirectoryW(folder.c_str(), nullptr);
+    for (const std::wstring& log : LogFilesIn(folder))
+        DeleteFileW((folder + L"\\" + log).c_str());
+    return folder;
+}
+
+std::wstring SlotLog(const std::wstring& folder, int slot)
+{
+    return folder + L"\\Luxvelum-" + std::to_wstring(slot) + L".log";
+}
+
+void CheckSecondClientWritesTheSecondSlot(const std::wstring& outDir)
+{
+    const std::wstring folder = EmptyLogFolder(outDir, L"two-clients");
+    const std::wstring shared = folder + L"\\Luxvelum.log";
+    const std::wstring own = SlotLog(folder, 2);
+    LogFile first = OpenLogFile(NarrowPath(shared));
+    LogFile second = OpenLogFile(NarrowPath(shared));
+    const std::string firstLine = WrittenAndClosed(first, "first client");
+    const std::string secondLine = WrittenAndClosed(second, "second client");
+    Check(first.path == NarrowPath(shared) && second.path == NarrowPath(own) && !firstLine.empty() &&
+              ReadText(shared) == firstLine && !secondLine.empty() && ReadText(own) == secondLine,
+          "a second client started from the same folder writes Luxvelum-2.log and leaves the first client's "
+          "Luxvelum.log intact");
+}
+
+void CheckHeldSlotIsSkippedUntouched(const std::wstring& outDir)
+{
+    const std::wstring folder = EmptyLogFolder(outDir, L"three-clients");
+    const std::string shared = NarrowPath(folder + L"\\Luxvelum.log");
+    std::vector<LogFile> clients = {OpenLogFile(shared), OpenLogFile(shared)};
+    const std::string secondLine = WrittenAndKeptOpen(clients[1], "second client");
+    LogFile third = OpenLogFile(shared);
+    const std::string thirdLine = WrittenAndClosed(third, "third client");
+    CloseLogs(clients);
+    Check(!secondLine.empty() && ReadText(SlotLog(folder, 2)) == secondLine &&
+              third.path == NarrowPath(SlotLog(folder, 3)) && !thirdLine.empty() &&
+              ReadText(SlotLog(folder, 3)) == thirdLine,
+          "a third client skips the second client's held Luxvelum-2.log without truncating it and writes "
+          "Luxvelum-3.log");
+}
+
+void CheckFreedSlotIsReused(const std::wstring& outDir)
+{
+    const std::wstring folder = EmptyLogFolder(outDir, L"reused-slot");
+    const std::string shared = NarrowPath(folder + L"\\Luxvelum.log");
+    std::vector<LogFile> running = {OpenLogFile(shared)};
+    LogFile exited = OpenLogFile(shared);
+    WrittenAndClosed(exited, "exited client");
+    LogFile next = OpenLogFile(shared);
+    const std::string nextLine = WrittenAndClosed(next, "next client");
+    CloseLogs(running);
+    const std::vector<std::wstring> expected = {L"Luxvelum-2.log", L"Luxvelum.log"};
+    Check(exited.path == NarrowPath(SlotLog(folder, 2)) && next.path == exited.path && !nextLine.empty() &&
+              ReadText(SlotLog(folder, 2)) == nextLine && LogFilesIn(folder) == expected,
+          "a client started after another has exited reuses and truncates its Luxvelum-2.log, so no new log "
+          "file appears");
+}
+
+void CheckNoLogWhenEverySlotIsHeld(const std::wstring& outDir)
+{
+    const std::wstring folder = EmptyLogFolder(outDir, L"every-slot-held");
+    const std::string shared = NarrowPath(folder + L"\\Luxvelum.log");
+    std::vector<LogFile> holders;
+    for (int client = 1; client <= kLastLogSlot; ++client)
+        holders.push_back(OpenLogFile(shared));
+    const bool everyHolderLogs =
+        std::all_of(holders.begin(), holders.end(), [](const LogFile& log) { return log.file != nullptr; });
+    LogFile ninth = OpenLogFile(shared);
+    const bool ninthLogs = ninth.file != nullptr;
+    WrittenAndClosed(ninth, "ninth client");
+    CloseLogs(holders);
+    const size_t files = LogFilesIn(folder).size();
+    std::printf("     %zu log files with Luxvelum.log and every slot held\n", files);
+    Check(everyHolderLogs && !ninthLogs && files == static_cast<size_t>(kLastLogSlot),
+          "with Luxvelum.log and Luxvelum-2.log to Luxvelum-8.log held, a ninth client writes no log and adds no "
+          "file");
+}
+
+void CheckHeldLogNoticeNamesTheSlotAndProcess()
+{
+    const std::string notice =
+        HeldLogNotice("C:\\WoW\\Luxvelum.log", "C:\\WoW\\Luxvelum-2.log", kSecondClientProcessId);
+    std::printf("     %s\n", notice.c_str());
+    Check(notice.find("C:\\WoW\\Luxvelum.log") == 0 && notice.find("C:\\WoW\\Luxvelum-2.log") != std::string::npos &&
+              notice.find("process " + std::to_string(kSecondClientProcessId)) != std::string::npos,
+          "the first line of a slot log names the held Luxvelum.log, the slot file and the client's process id");
+}
+
+void CheckFogLogRefusesASecondWriter()
+{
+    FILE* second = _wfsopen(runtime_cost::FogDllLog().c_str(), L"r+", _SH_DENYNO);
+    if (second)
+        std::fclose(second);
+    Check(!second, "the DLL's log cannot be opened for writing by a second client while the DLL writes it");
+}
 
 void CheckFirstColumnIsFogged(const Image& transmittance, const D3DVIEWPORT9& world)
 {
@@ -1985,6 +3486,40 @@ void CheckDisabledTemporalIsStable(Harness& h, const Config& cfg, Vec3 eye, Vec3
     vf_test_set_config(&cfg);
 }
 
+void CheckVoidBelowTheHorizonMirrorsTheSky(Harness& h, const Config& cfg, Vec3 eye, const float* proj,
+                                           const D3DVIEWPORT9& world)
+{
+    Config transmittanceView = cfg;
+    transmittanceView.temporal = 0.0f;
+    transmittanceView.godRays = 0.0f;
+    transmittanceView.debugView = 2;
+    transmittanceView.dataMode = 0;
+    transmittanceView.noiseAmount = 0.0f;
+    vf_test_set_config(&transmittanceView);
+    const Vec3 level = Add(eye, {100.0f, 0.0f, 0.0f});
+    float view[16];
+    CameraRelativeLookAt(eye, level, view);
+    FrameInputs in = MakeInputs(view, proj, eye, level, world);
+    h.BeginFrame();
+    const char* skip = "";
+    const bool rendered = vf_test_render(&in, &skip) != 0;
+    const Image t = Capture(h.dev);
+    h.dev->EndScene();
+    vf_test_set_config(&cfg);
+    const UINT horizonRow = world.Y + world.Height / 2;
+    int worst = 0;
+    for (UINT rows : {kVoidProbeRows, 2 * kVoidProbeRows})
+        worst = std::max(worst, std::abs(static_cast<int>(t.At(world.Width / 2, horizonRow - rows)[2]) -
+                                         t.At(world.Width / 2, horizonRow + rows)[2]));
+    std::printf("     no geometry in view: sky transmittance %d/255 %u rows above the horizon, %d/255 below; largest "
+                "mirror difference %d/255\n",
+                t.At(world.Width / 2, horizonRow - kVoidProbeRows)[2], kVoidProbeRows,
+                t.At(world.Width / 2, horizonRow + kVoidProbeRows)[2], worst);
+    Check(rendered && worst <= kMaxVoidMirrorDifference,
+          "sky below the horizon, such as the void under Netherstorm's edges, thins the fog as the sky above does "
+          "instead of a level ray through the whole fog range");
+}
+
 int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstring& iniPath,
         const std::string& waterDataPath, bool cpuOnly = false)
 {
@@ -1993,6 +3528,27 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     FogData classic;
     Check(classic.Load(dataPath), "Classic fog data loads");
     CheckClassicData(classic);
+    CheckZeroWeightLightsLeaveTheLoggedBlendAlone();
+    CheckOutlandAndNorthrendHaveTheirOwnLights(classic);
+    CheckRegionalFogSettings();
+    CheckOutlandDensityThinsTheConvertedFog(classic);
+    CheckOutlandSkyColourTintsTheConvertedFog(classic);
+    CheckLayerSlidersScaleTheClassicLayers(classic);
+    CheckConvertedGroundFogFollowsTheHeightOfItsLight(classic);
+    CheckConvertedLightsCarryNoClassicNoise(classic);
+    CheckSunlessSkiesScatterNoSunOrMoon(classic);
+    CheckGrizzlyHillsSholazarAndBoreanTundraKeepTheSun(classic);
+    CheckSunlessByDayKeepsTheMoon();
+    CheckGhostlandsScattersNoSun(classic);
+    CheckMap530StartingZonesHaveTheirOwnRegion();
+    CheckZoneHaloFade();
+    CheckZoneHaloKeepsTheZoneThroughAnUnknownOne();
+    CheckZoneHaloScalesTheScatter();
+    CheckZoneDensityScalesTheFog();
+    CheckHellfireKeepsOnlyAThinGroundFogUnderAClearSky(classic);
+    CheckMoonScattersOnItsOwn(classic);
+    CheckLocalLightsGlowByRegion();
+    CheckLocalLightReachFollowsRegion();
     CheckStormBlendsLayersByClassicIndex(classic);
     CheckScreenEffectLightSlot(classic);
     CheckZoneLights(classic);
@@ -2010,15 +3566,35 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     LogOpen(NarrowPath(g_harnessLog).c_str());
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     CheckOverlayKeyNames();
+    luxvelum_switch_checks::CheckToggleKeySetting(outDir, FullPath(iniPath));
+    luxvelum_switch_checks::CheckTheSwitchTakesEffectAtTheNextFrame();
     CheckSettingsSaveKeepsTheIni(outDir, FullPath(iniPath));
+    CheckRegionLocalLightsSetting(outDir, FullPath(iniPath));
+    CheckZoneHaloTable(outDir);
+    CheckZoneHaloOwnOverShipped(outDir);
     CheckEarlierSettingsAreTakenOver(outDir, FullPath(iniPath));
+    CheckEarlierSettingsAreTakenOverWhateverTheirShape(outDir, FullPath(iniPath));
+    CheckClientInstallLayout(outDir, FullPath(iniPath));
+    CheckTheDllUsesTheClientFolders();
     CheckTheVersionDllLoader();
     CheckFogDataBounds(outDir, dataPath);
+    fog_data_choice_checks::CheckFogDataFilesAreChosen(outDir, dataPath);
     forever_look_checks::CheckForeverGlow();
     forever_look_checks::CheckLookSettings(outDir, FullPath(iniPath));
     water_data_checks::CheckWaterData(outDir, waterDataPath);
     water_settings_checks::CheckWaterSettings(outDir, FullPath(iniPath));
     transparent_fog_checks::CheckTransparentFogSetting(outDir, FullPath(iniPath));
+    authored_noise::CheckShippedIniTurnsClassicNoiseOn(FullPath(iniPath));
+    CheckLightProjectsOntoTheViewport();
+    CheckGetProcAddressSlotStates();
+    device_creation_checks::CheckDisplayFormats();
+    multisampling_checks::CheckNvapiLoadsWithoutKb2533623();
+    CheckSecondClientWritesTheSecondSlot(outDir);
+    CheckHeldSlotIsSkippedUntouched(outDir);
+    CheckFreedSlotIsReused(outDir);
+    CheckNoLogWhenEverySlotIsHeld(outDir);
+    CheckHeldLogNoticeNamesTheSlotAndProcess();
+    CheckFogLogRefusesASecondWriter();
 
     if (cpuOnly)
     {
@@ -2027,9 +3603,18 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
         CheckInteriorInputsSurviveAnIncompleteWalk();
         CheckHdrLocalLightColours();
         local_light_stabiliser_checks::CheckLocalLightStabiliser();
+        twin_light_checks::CheckTwinLights();
+        celestial_shadow::CheckTheSmoothedShareOfTheSightLine();
         client_light_stay_checks::CheckClientLightStay();
+    fog_data_choice_checks::CheckClientIntBandReads();
+    fog_data_choice_checks::CheckFogDataChoice();
+    dxvk_vendor_checks::CheckDxvkVendor();
+        client_map_checks::CheckCurrentMapFollowsTheFarClipSetter();
+        camera_focus_checks::CheckTheFocusFollowsTheClientStores();
+        camera_focus_checks::CheckTheCharacterBoxFollowsTheFocus();
         CheckInteriorFogInputs();
         water_contact_checks::CheckWaterContacts();
+        CheckTheDllStaysLoadedAfterFreeLibrary(outDir);
         CoUninitialize();
         std::printf("CPU checks %s (%d failures); D3D9 graphics checks were not run\n",
                     g_failures ? "FAILED" : "OK", g_failures);
@@ -2069,18 +3654,17 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     h.pp.AutoDepthStencilFormat = kClientDepthFormat;
     h.pp.hDeviceWindow = h.window;
     h.pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
-    DWORD engineFlags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
-    Check(engineFlags == 0x52, "harness uses the client's device flags");
     Config startup = {};
     vf_test_set_config(&startup);
-    HRESULT hr = h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, engineFlags, &h.pp, &h.dev);
+    HRESULT hr = h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, kClientDeviceFlags, &h.pp, &h.dev);
     Check(SUCCEEDED(hr) && h.dev, "CreateDevice through the wrapper");
     if (!h.dev)
         return 1;
 
     D3DDEVICE_CREATION_PARAMETERS cp;
     h.dev->GetCreationParameters(&cp);
-    Check((cp.BehaviorFlags & D3DCREATE_PUREDEVICE) == 0, "pure-device flag removed");
+    Check((cp.BehaviorFlags & kClientDeviceFlags) == kFogDeviceFlags,
+          "the fog device keeps hardware vertex processing and FPU preservation and drops only the pure-device flag");
     D3DADAPTER_IDENTIFIER9 adapter = {};
     D3DCAPS9 caps = {};
     h.d3d->GetAdapterIdentifier(0, 0, &adapter);
@@ -2110,20 +3694,33 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     CheckInteriorInputsSurviveAnIncompleteWalk();
     CheckHdrLocalLightColours();
     local_light_stabiliser_checks::CheckLocalLightStabiliser();
+    twin_light_checks::CheckTwinLights();
+    celestial_shadow::CheckTheSmoothedShareOfTheSightLine();
     client_light_stay_checks::CheckClientLightStay();
+    fog_data_choice_checks::CheckClientIntBandReads();
+    fog_data_choice_checks::CheckFogDataChoice();
+    dxvk_vendor_checks::CheckDxvkVendor();
+    client_map_checks::CheckCurrentMapFollowsTheFarClipSetter();
+    camera_focus_checks::CheckTheFocusFollowsTheClientStores();
+    camera_focus_checks::CheckTheCharacterBoxFollowsTheFocus();
     CheckInteriorFogInputs();
     CheckNoiseVariation(h.dev);
     authored_noise::CheckAuthoredNoiseOnTheGpu(h.dev);
     classic_phase::CheckIsotropicSlabSaturation(h.dev);
     march_layers::CheckUnrolledMarchMatchesLoopedMarch(h.dev);
+    celestial_shadow::CheckHaloOfAHiddenLight(h.dev);
     local_light_gpu::CheckLocalLightIntegration(h.dev);
     silhouette_quality::CheckSilhouettes(h.dev);
     grazing_upsample::CheckGrazingGroundUpsample(h.dev);
     god_ray_quality::CheckGodRays(h.dev);
+    display_dither::CheckDisplayDither(h.dev);
     CheckTemporalQuality(h.dev);
     CheckTemporalFallbackNoise(h.dev);
     CheckLightDisappearanceHistory(h);
     CheckSunOccluderLeavesFogLit(h);
+    god_ray_shafts::CheckGodRaysAddOnlyShafts(h, outDir);
+    god_ray_shafts::CheckTheOwnCharacterCastsNoShafts(h, outDir);
+    god_ray_shafts::CheckTrunksBesideTheOwnCharacterKeepTheirShafts(h, outDir);
     classic_phase::CheckSunsetHaloKeepsItsHue(h, FullPath(iniPath));
     water_fft_checks::CheckWaterFft(h.dev);
     water_mask_packing_checks::CheckWaveFoamMaskPacking(h.dev);
@@ -2221,6 +3818,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
 
     CheckLinearComposite(h, cfg, eye, at, proj, world);
     CheckDisabledTemporalIsStable(h, cfg, eye, at, proj, world);
+    CheckVoidBelowTheHorizonMirrorsTheSky(h, cfg, eye, proj, world);
     forever_look_checks::CheckColourGrading(h, world, classic);
     forever_look_checks::CheckFogCompensatesTheDeliveredGlow(h, cfg, world);
     vf_test_set_config(&cfg);
@@ -2451,6 +4049,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     CheckDepthWriteStateBlockRestore(h.dev);
     CheckWorldTextDepthIsolation(h);
     transparent_fog_checks::CheckTransparentFog(h);
+    luxvelum_switch_checks::CheckSwitchedOffFogLeavesTheFrameToTheClient(h);
     early_composite_look::CheckLookThroughTheEarlyComposite(h);
     Config restored = cfg;
     vf_test_set_config(&restored);
@@ -2460,12 +4059,18 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     vf_test_set_config(&restored);
     client_sprite_checks::CheckClientSprites(h);
     vf_test_set_config(&restored);
+    luxvelum_switch_checks::CheckSwitchedOffWaterIsReleased(h);
+    luxvelum_switch_checks::CheckSwitchedOffGivesBackTheSpriteGate(h);
+    vf_test_set_config(&restored);
     water_checks::CheckWaterPass(h, outDir, waterDataPath);
     vf_test_set_config(&restored);
     ripple_scene::CheckWakesShowInShadedWater(h, outDir, waterDataPath);
     vf_test_set_config(&restored);
 
     CheckOverlayInput(h);
+    luxvelum_switch_checks::CheckToggleKeyInput(h);
+    luxvelum_switch_checks::CheckSwitchedOnWhenNothingCouldSwitchItOn();
+    CheckHotkeyCharactersSwallowedOnlyWhileTheHotkeyIsTyped(h);
     const size_t logBeforeWidgets = water_settings_checks::DllLogSize();
     CheckOverlayWidgets(h);
     water_settings_checks::CheckSliderDragLoggedOnce(logBeforeWidgets);
@@ -2509,6 +4114,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     runtime_cost::CheckDisabledTemporalSkipsHistoryPasses(h, eye, at, proj, resized);
     CheckRendererSwitchesLitShaders(h);
     authored_noise::CheckRendererDrawsStormNoise(h);
+    authored_noise::CheckRendererDrawsLitStormNoise(h);
     runtime_cost::CheckFrameSummaryLogsClassicExtras(h);
     runtime_cost::CheckLocalLightLogLines(h);
     runtime_cost::CheckDepthProbeAndGpuTimeLog(h, eye, at);
@@ -2521,7 +4127,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     ULONG devRefs = h.dev->Release();
     client_sprite_checks::CheckDeviceReleaseRestoresTheGate();
     h.dev = nullptr;
-    hr = h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, engineFlags, &h.pp, &h.dev);
+    hr = h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, kClientDeviceFlags, &h.pp, &h.dev);
     Check(SUCCEEDED(hr) && h.dev, "a device is created again on the harness window");
     if (h.dev)
     {
@@ -2533,10 +4139,35 @@ int Run(const std::wstring& outDir, const std::string& dataPath, const std::wstr
     ULONG d3dRefs = h.d3d->Release();
     Check(devRefs == 0 && d3dRefs == 0, "wrapper reference counts reach zero");
     multisampling_checks::CheckMultisampling(realCreate, h.window, outDir, FullPath(iniPath));
+    device_creation_checks::CheckDeviceCreation(realCreate, h.window);
     vf_test_set_config(&restored);
     DestroyWindow(h.window);
+    CheckTheDllStaysLoadedAfterFreeLibrary(outDir);
     CoUninitialize();
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");
+    return g_failures ? 1 : 0;
+}
+
+constexpr float kSavedInteriorFarFog = 0.8f;
+
+int RunInterior(const std::wstring& outDir, const std::wstring& shippedIni)
+{
+    CheckInteriorFogInputs();
+    CreateDirectoryW(outDir.c_str(), nullptr);
+    const std::wstring iniCopy = FullPath(outDir + L"\\interior.ini");
+    Check(CopyFileW(FullPath(shippedIni).c_str(), iniCopy.c_str(), FALSE) != FALSE,
+          "the interior scene saves to a fresh copy of the shipped Luxvelum.ini");
+    ConfigStore settings;
+    settings.Load(NarrowPath(iniCopy));
+    Check(settings.Get().interiorFarFog != kSavedInteriorFarFog,
+          "the copied INI does not hold the InteriorFarFog the check saves yet");
+    Config edited = settings.Get();
+    edited.interiorFarFog = kSavedInteriorFarFog;
+    settings.Apply(edited);
+    Check(settings.Save(), "InteriorFarFog saves through the setting registry");
+    ConfigStore reloaded;
+    reloaded.Load(NarrowPath(iniCopy));
+    Check(reloaded.Get().interiorFarFog == kSavedInteriorFarFog, "InteriorFarFog reloads from the ini");
     return g_failures ? 1 : 0;
 }
 
@@ -2797,8 +4428,7 @@ int RunHarbour(const std::wstring& outDir, const std::string& dataPath, const Ha
     h.pp.AutoDepthStencilFormat = kClientDepthFormat;
     h.pp.hDeviceWindow = h.window;
     h.pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
-    DWORD engineFlags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
-    if (FAILED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, engineFlags, &h.pp, &h.dev)) || !h.dev)
+    if (FAILED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, kClientDeviceFlags, &h.pp, &h.dev)) || !h.dev)
     {
         std::printf("CreateDevice through the wrapper failed\n");
         h.d3d->Release();
@@ -3011,9 +4641,9 @@ namespace
 int wmain(int argc, wchar_t** argv)
 {
     std::wstring out = L"harness-out";
-    std::string data = "fogdata.bin";
-    std::string waterData = "waterdata.bin";
-    std::wstring ini = L"LuxVelum.ini";
+    std::string data = "Data\\Luxvelum\\fogdata.bin";
+    std::string waterData = "Data\\Luxvelum\\waterdata.bin";
+    std::wstring ini = L"WTF\\Luxvelum.ini";
     std::wstring scene;
     D3DMULTISAMPLE_TYPE samples = D3DMULTISAMPLE_NONE;
     HarbourOptions harbour;
@@ -3049,21 +4679,7 @@ int wmain(int argc, wchar_t** argv)
         }
     }
     if (scene == L"interior")
-    {
-        CheckInteriorFogInputs();
-        ConfigStore settings;
-        char path[MAX_PATH] = {};
-        WideCharToMultiByte(CP_ACP, 0, ini.c_str(), -1, path, MAX_PATH, nullptr, nullptr);
-        settings.Load(path);
-        Config edited = settings.Get();
-        edited.interiorFarFog = 0.8f;
-        settings.Apply(edited);
-        Check(settings.Save(), "InteriorFarFog saves through the setting registry");
-        ConfigStore reloaded;
-        reloaded.Load(path);
-        Check(reloaded.Get().interiorFarFog == 0.8f, "InteriorFarFog reloads from the ini");
-        return g_failures ? 1 : 0;
-    }
+        return RunInterior(out, ini);
     if (scene == L"harbour")
         return RunHarbour(out, data, harbour);
     if (scene == L"performance")

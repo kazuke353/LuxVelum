@@ -11,10 +11,13 @@
 
 using Direct3DCreate9Fn = IDirect3D9*(WINAPI*)(UINT);
 
+D3DFORMAT DisplayFormatFor(D3DFORMAT backBufferFormat);
+
 void SetRealDirect3DCreate9(Direct3DCreate9Fn fn);
 IDirect3D9* WINAPI WrappedDirect3DCreate9(UINT sdkVersion);
 
 void AllowFogOnNewDevices(bool allowedOnNewDevices);
+void FailDepthCreation(bool failing);
 
 class FogDevice;
 FogDevice* LatestFogDevice();
@@ -31,6 +34,7 @@ bool FogReadyToRender(FogDevice* device, const D3DVIEWPORT9& vp, const char** sk
 bool RenderGodRaysAfterWorld(FogDevice* device, const char** skipReason);
 StockFogFit LastStockFogFit(FogDevice* device);
 bool AdaptiveLightingHistory(FogDevice* device);
+bool FogHistoryValid(FogDevice* device);
 void DrawnFogShaders(FogDevice* device, IDirect3DPixelShader9** march, IDirect3DPixelShader9** composite,
                      IDirect3DPixelShader9** splitComposite);
 float DrawnFogGlowCompensation(FogDevice* device);

@@ -219,7 +219,8 @@ bool AddPointLight(FrameInputs& inputs, Vec3 position, const float* color, float
     std::memcpy(light.color, color, sizeof(light.color));
     light.attenuation[0] = 1.0f;
     light.attenuation[2] = quadraticAttenuation;
-    return engine::SelectLocalPointLight(inputs.localLights, light, inputs.camPos, LocalLightUpload(Config{}));
+    const PointLightUpload upload = LocalLightUpload(Config{}, CameraPlace(inputs));
+    return engine::SelectLocalPointLight(inputs.localLights, light, inputs.camPos, upload);
 }
 
 bool AddFloodLights(FrameInputs& inputs, const Street& street)
@@ -284,19 +285,19 @@ void DescribeLights(const char* name, const FrameInputs& inputs)
                 lights.pointLightCount, shortestReach, longestReach, nearest, farthest);
 }
 
-std::string FogDataBesideTheFogDll()
+std::string FogDataOfTheFogDll()
 {
     char path[MAX_PATH] = {};
-    const DWORD length = GetModuleFileNameA(GetModuleHandleA("LuxVelum.dll"), path, MAX_PATH);
+    const DWORD length = GetModuleFileNameA(GetModuleHandleA("Luxvelum.dll"), path, MAX_PATH);
     const std::string module(path, length);
-    return module.substr(0, module.find_last_of("\\/") + 1) + "fogdata.bin";
+    return ClientInstallPaths(module.substr(0, module.find_last_of("\\/") + 1)).fogData;
 }
 
 bool ClassicFogResolves(const FrameInputs& inputs, int& layers, int& noisyLayers)
 {
     FogData data;
     AuthoredFog fog = {};
-    const bool resolved = data.Load(FogDataBesideTheFogDll()) &&
+    const bool resolved = data.Load(FogDataOfTheFogDll()) &&
                           data.Resolve(inputs.mapId, inputs.camPos, inputs.dayFraction, inputs.lightParams, fog);
     layers = fog.layerCount;
     noisyLayers = 0;
@@ -459,7 +460,7 @@ bool MeasureCases(Harness& h)
                     "authored noise); in a full storm %d layers (%d with authored noise)\n",
                     classicLayers, noisyLayers, stormLayers, noisyStormLayers);
     else
-        std::printf("classic cases skipped: fogdata.bin beside LuxVelum.dll does not resolve the harbour\n");
+        std::printf("classic cases skipped: the fogdata.bin of Luxvelum.dll does not resolve the harbour\n");
 
     if (!WarmUpGpuClocks(h, timer, derivedStreet, projection, viewport))
         return false;
@@ -520,9 +521,9 @@ int RunPerformance(D3DMULTISAMPLE_TYPE samples)
     h.pp.MultiSampleType = samples;
     h.pp.hDeviceWindow = h.window;
     h.pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
-    const DWORD flags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
     bool completed = false;
-    if (h.d3d && SUCCEEDED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, flags, &h.pp, &h.dev)) && h.dev)
+    if (h.d3d && SUCCEEDED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, kClientDeviceFlags, &h.pp, &h.dev)) &&
+        h.dev)
         completed = performance_scene::MeasureCases(h);
     if (h.dev)
         h.dev->Release();

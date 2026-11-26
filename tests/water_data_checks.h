@@ -21,6 +21,7 @@ constexpr int kShoreSlot = static_cast<int>(WaterMaskSlot::ShoreFoam);
 constexpr int kDepthSlot = static_cast<int>(WaterMaskSlot::DepthFoam);
 constexpr uint32_t kSmallMaskSide = 4;
 constexpr uint32_t kSmallMaskLevels = 3;
+constexpr size_t kShiftedMaskLevel = 3;
 
 struct FileHeader
 {
@@ -243,21 +244,34 @@ float MeanCoverage(const std::vector<uint8_t>& texels)
     return texels.empty() ? 0.0f : static_cast<float>(sum / texels.size());
 }
 
-bool SecondLevelIsBoxFiltered(const WaterMaskLevels& mask)
+bool LevelIsBoxFilterOf(const std::vector<uint8_t>& upper, size_t side, const std::vector<uint8_t>& level)
 {
-    const size_t side = mask.info.size;
     const size_t half = side / 2;
-    const std::vector<uint8_t>& top = mask.levels[0];
-    const std::vector<uint8_t>& next = mask.levels[1];
     for (size_t y = 0; y < half; ++y)
         for (size_t x = 0; x < half; ++x)
         {
             const size_t t = 2 * y * side + 2 * x;
-            const float box = (top[t] + top[t + 1] + top[t + side] + top[t + side + 1]) * 0.25f;
-            if (std::fabs(box - next[y * half + x]) > kBoxFilterTolerance)
+            const float box = (upper[t] + upper[t + 1] + upper[t + side] + upper[t + side + 1]) * 0.25f;
+            if (std::fabs(box - level[y * half + x]) > kBoxFilterTolerance)
                 return false;
         }
-    return std::fabs(MeanCoverage(top) - mask.levels.back()[0]) <= kBoxFilterTolerance;
+    return true;
+}
+
+bool EveryLevelIsBoxFiltered(const WaterMaskLevels& mask)
+{
+    for (size_t level = 0; level + 1 < mask.levels.size(); ++level)
+        if (!LevelIsBoxFilterOf(mask.levels[level], mask.info.size >> level, mask.levels[level + 1]))
+            return false;
+    return std::fabs(MeanCoverage(mask.levels[0]) - mask.levels.back()[0]) <= kBoxFilterTolerance;
+}
+
+WaterMaskLevels WithShiftedLevel(const WaterMaskLevels& mask, size_t level)
+{
+    WaterMaskLevels shifted = mask;
+    std::vector<uint8_t>& texels = shifted.levels[level];
+    std::rotate(texels.begin(), texels.begin() + 1, texels.end());
+    return shifted;
 }
 
 bool TintsBrightenWithCoverage(const WaterMask& info)
@@ -366,8 +380,10 @@ void CheckTilesAndMasks(const WaterData& data)
           "foam_high coverage is the BLP alpha channel");
     bool boxFiltered = true;
     for (const WaterMaskLevels& mask : masks)
-        boxFiltered = boxFiltered && SecondLevelIsBoxFiltered(mask);
+        boxFiltered = boxFiltered && EveryLevelIsBoxFiltered(mask);
     Check(boxFiltered, "each stored mip level is the 2x2 box filter of the level above, down to 1x1");
+    Check(!EveryLevelIsBoxFiltered(WithShiftedLevel(masks[0], kShiftedMaskLevel)),
+          "the mip check catches a foam mask whose level 3 is shifted by a texel with its mean kept");
 }
 
 void CheckMalformedFiles(const std::vector<uint8_t>& original)
@@ -421,6 +437,8 @@ void CheckMalformedFiles(const std::vector<uint8_t>& original)
     CheckRejectedEdit(file, [](WaterFile& f) { f.masks[2].info.tintHigh[1] = std::numeric_limits<float>::quiet_NaN(); },
                       "water data rejects a NaN mask tint");
     CheckRejectedEdit(file, [](WaterFile& f) { f.tiles[2].size = 0.0f; }, "water data rejects a zero-sized FFT tile");
+    CheckRejectedEdit(file, [](WaterFile& f) { f.tiles[2].size = 37.5f; },
+                      "water data rejects an FFT tile size that is not a whole number of yards");
 
     CheckRejectedHeader(original, [](FileHeader& h) { h.tileOffset = h.presetOffset; },
                         "water data rejects overlapping sections");
@@ -484,6 +502,9 @@ void CheckAssignRejectsInconsistentData()
     badTile = tile;
     badTile.size = 0.0f;
     Check(!data.Assign(&preset, 1, &badTile, 1, &mask, 1), "Assign rejects a zero-sized tile");
+    badTile.size = 0.5f;
+    Check(!data.Assign(&preset, 1, &badTile, 1, &mask, 1),
+          "Assign rejects an FFT tile size that is not a whole number of yards (0.5)");
 }
 
 void CheckDllRejectsNonFiniteFile(const std::wstring& outDir, const std::vector<uint8_t>& original,

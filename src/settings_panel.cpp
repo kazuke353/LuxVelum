@@ -1,5 +1,9 @@
 #include "settings_panel.h"
 
+#include "build_id.h"
+#include "luxvelum_switch.h"
+#include "zone_halo.h"
+
 #include "imgui.h"
 
 #include <algorithm>
@@ -10,6 +14,8 @@
 namespace
 {
 constexpr float kMultiplierSliderMax = 4.0f;
+constexpr float kLayerSliderMax = 2.0f;
+constexpr float kLocalLightSliderMax = 8.0f;
 constexpr float kPanelWidthInLines = 30.0f;
 constexpr float kPanelHeightInLines = 42.0f;
 constexpr float kMinPanelWidthInLines = 20.0f;
@@ -17,16 +23,18 @@ constexpr float kMinPanelHeightInLines = 16.0f;
 constexpr float kPanelMarginInLines = 2.0f;
 constexpr float kLabelWidthInLines = 11.0f;
 constexpr float kLabelShareOfWidth = 0.45f;
-constexpr float kFirstFooterLines = 4.0f;
+constexpr float kFirstFooterLines = 5.0f;
 constexpr float kNoTextWrap = -1.0f;
 constexpr size_t kStatusTextSize = 512;
+constexpr size_t kWindowTitleSize = 96;
 const ImVec4 kDrawnColour = {0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kSkippedColour = {0.95f, 0.75f, 0.35f, 1.0f};
 const ImVec4 kErrorColour = {1.0f, 0.4f, 0.4f, 1.0f};
 
 const char* const kQualityNames[] = {"Low: quarter resolution, 16 steps", "Medium: half resolution, 24 steps",
                                      "High: half resolution, 32 steps"};
-const char* const kDebugViewNames[] = {"Off", "Fog radiance", "Transmittance", "Linear depth", "Sun shadow"};
+const char* const kDebugViewNames[] = {"Off", "Fog radiance", "Transmittance", "Linear depth",
+                                       "Full-resolution march"};
 const char* const kLogLevelNames[] = {"Errors", "Info", "Debug"};
 const char* const kWaterQualityNames[] = {"Low: 128 waves, sky reflections only",
                                           "Medium: 256 waves, scene reflections",
@@ -81,6 +89,11 @@ bool Multiplier(const char* label, float& value, const char* help)
     return Slider(label, value, 0.0f, kMultiplierSliderMax, "%.2f", help);
 }
 
+bool LayerMultiplier(const char* label, float& value, const char* help)
+{
+    return Slider(label, value, 0.0f, kLayerSliderMax, "%.3f", help);
+}
+
 bool Toggle(const char* label, bool& value, const char* help)
 {
     const bool changed = ImGui::Checkbox(label, &value);
@@ -133,6 +146,22 @@ void DrawWaterStatus(const WaterFrameStatus& status)
         StatusLine(kSkippedColour, "Water: Not drawing (%s)", named ? status.reason : "no reason given");
 }
 
+void DrawSwitchRow(const Config& cfg)
+{
+    const std::string key = HotkeyName(cfg.toggleKey);
+    char help[kStatusTextSize];
+    std::snprintf(help, sizeof(help),
+                  "Off: the game draws its own fog, water and glow, as without Luxvelum, until Luxvelum is switched "
+                  "on again; a client restart switches it on. ToggleKey in Luxvelum.ini does the same with a key "
+                  "(now %s)",
+                  key.c_str());
+    bool on = !LuxvelumSwitchFlippedOff();
+    if (Toggle("Luxvelum on", on, help))
+        FlipLuxvelumSwitch();
+    ImGui::SameLine();
+    ImGui::TextDisabled("ToggleKey: %s", key.c_str());
+}
+
 void DrawMultisamplingStatus(const MultisamplingStatus& status)
 {
     if (status.method && *status.method)
@@ -161,9 +190,13 @@ bool DrawDensity(Config& c)
         return false;
     bool changed = Multiplier("Density", c.density,
                               "Fog thickness affects visibility and scattered light. Use Sun scatter for the halo.");
-    changed |= Multiplier("Haze", c.haze, "Distance haze where no Classic data exists");
-    changed |= Multiplier("Ground fog", c.groundFog, "Low ground mist where no Classic data exists");
-    changed |= Multiplier("Distance fog", c.farFog, "The distance fog that replaces the stock fog");
+    changed |= LayerMultiplier("Haze", c.haze, "Distance haze; with Classic data its first layer, the haze");
+    changed |= LayerMultiplier(
+        "Ground fog", c.groundFog,
+        "Low ground mist; with Classic data its third layer, the ground fog (0.6 keeps it as authored)");
+    changed |= LayerMultiplier(
+        "Distance fog", c.farFog,
+        "The distance fog that replaces the stock fog; with Classic data also its far wall layer");
     changed |= Toggle("Replace the stock fog", c.stockFog,
                       "On: the volumetric distance fog replaces the client's linear fog. Off: keep the stock fog");
     changed |= Toggle("Classic fog layers", c.dataMode,
@@ -184,12 +217,122 @@ bool DrawDensity(Config& c)
     return changed;
 }
 
+bool SkyColour(const char* label, float& value, const char* region)
+{
+    char help[kStatusTextSize];
+    std::snprintf(help, sizeof(help),
+                  "How much the fog in %s takes the hue of the client's current fog colour, which blends the land "
+                  "into the sky and follows the weather, at the fog's own brightness: 1 = that hue, 0 = the colours "
+                  "in fogdata.bin",
+                  region);
+    return Slider(label, value, 0.0f, 1.0f, "%.2f", help);
+}
+
+bool RegionLocalLights(const char* label, float& value, const char* region)
+{
+    char help[kStatusTextSize];
+    std::snprintf(help, sizeof(help),
+                  "Local light intensity in %s, on top of Local light intensity; the region's density does not "
+                  "change the lamps' glow",
+                  region);
+    return Slider(label, value, 0.0f, kRegionLocalLightsSliderMax, "%.2f", help, ImGuiSliderFlags_Logarithmic);
+}
+
+bool DrawRegions(Config& c)
+{
+    const Section section("Regions", ImGuiTreeNodeFlags_DefaultOpen);
+    if (!section)
+        return false;
+    bool changed = Toggle("Outland fog data", c.outlandClassicFog,
+                          "On: Outland's fog layers come from its own client lights, converted into fogdata.bin with "
+                          "the layers of the most alike Classic light. Off: derived layers, with the client's glow and "
+                          "no colour grading. The Burning Crusade starting zones keep their converted lights");
+    changed |= Toggle("Northrend fog data", c.northrendClassicFog,
+                      "On: Northrend's fog layers come from its own client lights, converted into fogdata.bin with "
+                      "the layers of the most alike Classic light. Off: derived layers, with the client's glow and no "
+                      "colour grading");
+    changed |= Multiplier("Azeroth density", c.azerothDensity,
+                          "Fog thickness on the old continents, in their dungeons and on every other map, on top "
+                          "of Density");
+    changed |= SkyColour("Azeroth sky colour", c.azerothSkyColor, "Azeroth and on every other map");
+    changed |= RegionLocalLights("Azeroth local lights", c.azerothLocalLights, "Azeroth and on every other map");
+    changed |= Multiplier("Outland density", c.outlandDensity, "Fog thickness in Outland, on top of Density");
+    changed |= SkyColour("Outland sky colour", c.outlandSkyColor, "Outland");
+    changed |= RegionLocalLights("Outland local lights", c.outlandLocalLights, "Outland");
+    changed |= Multiplier("Northrend density", c.northrendDensity, "Fog thickness in Northrend, on top of Density");
+    changed |= SkyColour("Northrend sky colour", c.northrendSkyColor, "Northrend");
+    changed |= RegionLocalLights("Northrend local lights", c.northrendLocalLights, "Northrend");
+    changed |= Multiplier("TBC start density", c.tbcStartDensity,
+                          "Fog thickness in the Burning Crusade starting zones (Eversong Woods, the Ghostlands, "
+                          "Silvermoon, Quel'Danas, the Azuremyst and Bloodmyst isles, the Exodar), on top of Density");
+    changed |= SkyColour("TBC start sky colour", c.tbcStartSkyColor, "the Burning Crusade starting zones");
+    changed |= RegionLocalLights("TBC start local lights", c.tbcStartLocalLights,
+                                 "the Burning Crusade starting zones");
+    return changed;
+}
+
+const char* ZoneHaloSourceName(ZoneHaloSource source)
+{
+    switch (source)
+    {
+    case ZoneHaloSource::Own:
+        return "your own";
+    case ZoneHaloSource::Shipped:
+        return "shipped";
+    case ZoneHaloSource::Unlisted:
+        break;
+    }
+    return "not listed";
+}
+
+void DrawZoneHalo()
+{
+    const Section section("This zone", ImGuiTreeNodeFlags_DefaultOpen);
+    if (!section)
+        return;
+    ZoneHaloBook& book = GlobalZoneHalo();
+    const ZoneHaloView view = book.Current();
+    if (view.zoneId <= 0)
+    {
+        ImGui::TextDisabled("No zone yet");
+        return;
+    }
+    ImGui::Text("%s (zone %d), %s", view.zoneName[0] ? view.zoneName : "Unnamed zone", view.zoneId,
+                ZoneHaloSourceName(view.source));
+    ZoneHaloFactors factors = view.factors;
+    bool changed = Slider("Sun halo here", factors.sun, 0.0f, kZoneHaloMax, "%.2f",
+                          "The sun's halo in this zone, on top of Sun scatter; saved as your own to "
+                          "WTF\\Luxvelum-zones.ini when you let go. 1 = as Sun scatter alone");
+    bool released = ImGui::IsItemDeactivatedAfterEdit();
+    changed |= Slider("Moon halo here", factors.moon, 0.0f, kZoneHaloMax, "%.2f",
+                      "The moon's halo in this zone, on top of Moon scatter; saved as your own to "
+                      "WTF\\Luxvelum-zones.ini when you let go. 1 = as Moon scatter alone");
+    released |= ImGui::IsItemDeactivatedAfterEdit();
+    changed |= Slider("Fog density here", factors.density, 0.0f, kZoneHaloMax, "%.2f",
+                      "The fog's density in this zone, on top of Density and the region's density; saved as your "
+                      "own to WTF\\Luxvelum-zones.ini when you let go. 1 = as those alone, 0 = no fog here");
+    released |= ImGui::IsItemDeactivatedAfterEdit();
+    if (changed)
+        book.Edit(factors);
+    if (released)
+        book.SaveCurrent();
+    ImGui::BeginDisabled(view.source != ZoneHaloSource::Own);
+    if (ImGui::Button("Reset this zone"))
+        book.ForgetCurrent();
+    ImGui::SetItemTooltip("Remove your own values for this zone from WTF\\Luxvelum-zones.ini, back to the shipped "
+                          "values of Data\\Luxvelum\\zones.ini, or 1 where it lists none");
+    ImGui::EndDisabled();
+}
+
 bool DrawLight(Config& c)
 {
     const Section section("Light", ImGuiTreeNodeFlags_DefaultOpen);
     if (!section)
         return false;
-    bool changed = Multiplier("Sun scatter", c.sunScatter, "In-scattered sun or moon light: the halo around it");
+    bool changed = Multiplier("Sun scatter", c.sunScatter, "In-scattered sun light by day: the halo around it");
+    changed |= Multiplier("Moon scatter", c.moonScatter,
+                          "In-scattered moon light at night, on its own: Sun scatter does not change it. 1 = as "
+                          "bright as the sun's halo");
     changed |= Slider("Sun shadow", c.sunShadow, 0.0f, 1.0f, "%.2f",
                       "How much walls, hills and buildings between the fog and the sun or moon darken that halo");
     changed |= Multiplier("Ambient", c.ambient, "Ambient fog brightness");
@@ -203,17 +346,19 @@ bool DrawLight(Config& c)
                       "Scatter and blend in linear light like the modern client, with a soft highlight roll-off. "
                       "Off: gamma");
     changed |= Toggle("Local lights", c.localLights, "Scatter point lights in view from the world into the fog");
-    changed |= Slider("Local light intensity", c.localLightIntensity, 0.0f, 8.0f, "%.2f",
+    changed |= Slider("Local light intensity", c.localLightIntensity, 0.0f, kLocalLightSliderMax, "%.2f",
                       "Brightness of the point lights in the fog");
     changed |= Slider("Local light phase", c.localLightPhase, -0.9f, 0.9f, "%.2f",
                       "How every point light scatters in the fog: 0 evenly in all directions; toward 0.9 mostly in "
                       "the fog between you and the light; below 0 the fog behind the light, steeply brighter toward "
                       "-0.9. The modern client uses one such value for all its lights; 0.3 is a calibration");
     changed |= Slider("God rays", c.godRays, 0.0f, 4.0f, "%.2f",
-                      "Radial rays from the bright sky around the sun, 0 = off");
+                      "Shafts of light through gaps in trees, buildings and terrain in front of the sun, 0 = off. An "
+                      "open sky, its clouds included, gets none; the glow around the sun is Sun scatter's");
     changed |= Toggle("Glow compensation", c.glowCompensation,
                       "Pre-compensate the fog for the client's full-screen glow, which otherwise bleaches bright fog "
-                      "around the sun to white");
+                      "around the sun to white. The fog itself only with linear light, while it blends over a copy "
+                      "of the scene; otherwise only the god rays are compensated");
     return changed;
 }
 
@@ -229,8 +374,9 @@ bool DrawGlowAndGrading(Config& c)
                           "coverage. Off: the client's glow");
     changed |= Slider("Colour grading", c.colorGrading, 0.0f, 1.0f, "%.2f",
                       "Strength of the modern client's colour curve for the lights around the camera: brighter "
-                      "midtones, and the brightest highlights clipped to white. Names, the interface, the ghost view "
-                      "and the view under water are not graded. 0 = off");
+                      "midtones, and the brightest highlights clipped to white. It grades the 3D view after the glow, "
+                      "names drawn in the world included; the interface, the ghost view and the view under water are "
+                      "not graded. 0 = off");
     return changed;
 }
 
@@ -257,12 +403,14 @@ bool DrawWorld(Config& c)
         return false;
     bool changed = Toggle("Fog under water", c.underwater, "Keep the effect while the camera is under water");
     changed |= Toggle("Fog effects at their own distance", c.transparentFog,
-                      "Particles, spell effects and other see-through models are fogged by their own distance, as "
-                      "the stock client does, with a linear fog fitted to the volumetric fog within 100 yd; the fog "
-                      "is drawn before them, after the water. Beyond 100 yd the line is extended, so distant effects "
-                      "and fading models can be fogged more or less than the scene around them, and past its end "
-                      "distant glows vanish. Off: the fog is drawn once after the world, before the names, and they "
-                      "take the fog of the scene behind them");
+                      "On by default. Particles, spell effects and other see-through models are fogged by their own "
+                      "distance, as the stock client does, with a linear fog fitted to the volumetric fog within "
+                      "100 yd, or in thin fog over a longer range up to where the fog halves the light, never past "
+                      "the far clip; the fog is drawn before them, after the water. Beyond the fitted range the line "
+                      "is extended, so distant effects and fading models can be fogged more or less than the scene "
+                      "around them, and past its end distant glows vanish. Off, the fallback if distant effects look "
+                      "wrongly fogged: the fog is drawn once after the world, before the names, and they take the "
+                      "fog of the scene behind them");
     changed |= Toggle("Water writes depth", c.liquidDepth,
                       "Let water surfaces write depth so water is fogged by its own distance; always on while Modern "
                       "water is drawn");
@@ -281,12 +429,19 @@ bool DrawAntialiasing(Config& c)
     const Section section("Antialiasing");
     if (!section)
         return false;
-    return Toggle("Keep the game's multisampling", c.multisampling,
-                  "Keep the game's Multisampling video option (smooth edges) when the graphics driver can copy its "
-                  "depth for the fog and water: NVIDIA through NVAPI, AMD and Intel through RESZ. Off: multisampling "
-                  "stays off. The game lists its Multisampling choices once per start, so turning this on takes "
-                  "effect after restarting the game; turning it off applies the next time the game resets its "
-                  "display, for example after changing Multisampling or the resolution in its Video options");
+    bool changed = Toggle("Keep the game's multisampling", c.multisampling,
+                          "Keep the game's Multisampling video option (smooth edges) when the graphics driver can "
+                          "copy its depth for the fog and water: NVIDIA through NVAPI, AMD and Intel through RESZ. "
+                          "Off: multisampling stays off. The game lists its Multisampling choices once per start, so "
+                          "turning this on takes effect after restarting the game; turning it off applies the next "
+                          "time the game resets its display, for example after changing Multisampling or the "
+                          "resolution in its Video options");
+    changed |= Toggle("Report AMD to DXVK", c.dxvkAmdVendor,
+                      "For an NVIDIA card behind DXVK: DXVK offers the RESZ depth copy only to AMD and Intel cards, so "
+                      "Luxvelum asks it to report AMD (d3d9.customVendorId = 1002) and multisampling becomes "
+                      "available, as that line in dxvk.conf would do. The game and DXVK then see an AMD card. "
+                      "Takes effect after restarting the game");
+    return changed;
 }
 
 bool DrawWater(Config& c)
@@ -305,8 +460,14 @@ bool DrawWater(Config& c)
     changed |= Slider("Foam", c.waterFoam, 0.0f, 2.0f, "%.2f", "Foam on wave crests and along shores, 0 = none");
     changed |= Slider("Reflections", c.waterReflections, 0.0f, 2.0f, "%.2f",
                       "Reflections of the sky and the scene, 0 = none");
+    changed |= Slider("Reflection waviness", c.waterReflectionWaviness, 0.0f, 1.0f, "%.2f",
+                      "How much the waves bend the reflections, without changing the waves themselves: lower is "
+                      "calmer and clearer, 0 = a mirror even on rough water, 1 = every wave bends them");
     changed |= Slider("Sun highlight", c.waterSpecular, 0.0f, 4.0f, "%.2f",
                       "Highlight of the sun or moon on the water, 0 = none");
+    changed |= Slider("Moon highlight", c.waterMoonGlint, 0.0f, 10.0f, "%.2f",
+                      "The moon's highlight on the water at night, on top of Sun highlight: the night's light is "
+                      "dim, while the moon's disc is bright. 1 = as dim as the night's light");
     changed |= Slider("Clarity", c.waterClarity, 0.25f, 4.0f, "%.2f",
                       "How far you see into the water; larger is clearer", ImGuiSliderFlags_Logarithmic);
     changed |= Slider("Zone colours", c.waterZoneColors, 0.0f, 1.0f, "%.2f",
@@ -330,8 +491,16 @@ bool DrawDebug(Config& c)
         return false;
     bool changed = Choice("View", c.debugView, 0, kDebugViewNames, "Show one input of the fog instead of the scene");
     changed |= Toggle("Sun marker", c.sunMarker, "Red marker where the sun direction projects on screen");
-    changed |= Choice("Log level", c.logLevel, 0, kLogLevelNames, "Detail written to LuxVelum.log");
+    changed |= Choice("Log level", c.logLevel, 0, kLogLevelNames, "Detail written to Luxvelum.log");
     return changed;
+}
+
+const char* WindowTitle()
+{
+    static char title[kWindowTitleSize] = {};
+    if (!title[0])
+        std::snprintf(title, sizeof(title), "Luxvelum %s (%s)###Luxvelum", kLuxvelumVersion, kLuxvelumBuildId);
+    return title;
 }
 }
 
@@ -369,7 +538,9 @@ bool SettingsPanel::DrawSettings(Config& edited, const FogFrameStatus& fogStatus
     ImGui::PushItemWidth(-labels);
     bool changed = DrawQuality(edited);
     changed |= DrawDensity(edited);
+    changed |= DrawRegions(edited);
     changed |= DrawLight(edited);
+    DrawZoneHalo();
     changed |= DrawGlowAndGrading(edited);
     changed |= DrawWorld(edited);
     changed |= DrawAntialiasing(edited);
@@ -385,6 +556,7 @@ void SettingsPanel::DrawFooter(ConfigStore& store, const WaterFrameStatus& water
 {
     const float top = ImGui::GetCursorPosY();
     ImGui::Separator();
+    DrawSwitchRow(store.Get());
     DrawWaterStatus(waterStatus);
     DrawMultisamplingStatus(multisampling);
     DrawSaveRow(store);
@@ -396,7 +568,7 @@ void SettingsPanel::Draw(ConfigStore& store, const FogFrameStatus& fogStatus, co
 {
     PlaceWindow();
     const bool expanded =
-        ImGui::Begin("LuxVelum", &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNavInputs);
+        ImGui::Begin(WindowTitle(), &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNavInputs);
     if (!expanded)
     {
         ImGui::End();
@@ -420,18 +592,18 @@ void SettingsPanel::DrawSaveRow(ConfigStore& store)
     ImGui::BeginDisabled(!unsaved);
     if (ImGui::Button("Save"))
         m_saveFailed = !store.Save();
-    ImGui::SetItemTooltip("Write the changed settings to LuxVelum.ini");
+    ImGui::SetItemTooltip("Write the changed settings to Luxvelum.ini");
     ImGui::SameLine();
     if (ImGui::Button("Revert"))
     {
         store.Revert();
         m_saveFailed = false;
     }
-    ImGui::SetItemTooltip("Go back to the settings in LuxVelum.ini");
+    ImGui::SetItemTooltip("Go back to the settings in Luxvelum.ini");
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (m_saveFailed)
-        ImGui::TextColored(kErrorColour, "Could not write LuxVelum.ini");
+        ImGui::TextColored(kErrorColour, "Could not write Luxvelum.ini");
     else
-        ImGui::TextDisabled("%s", unsaved ? "Unsaved changes" : "Matches LuxVelum.ini");
+        ImGui::TextDisabled("%s", unsaved ? "Unsaved changes" : "Matches Luxvelum.ini");
 }

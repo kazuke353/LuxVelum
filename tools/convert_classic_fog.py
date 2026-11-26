@@ -27,8 +27,8 @@ LIGHT_PARAMS_SLOTS = 8
 MINIMUM_OUTLINE_POINTS = 3
 
 FILE_MAGIC = b"VFD1"
-FORMAT_VERSION = 4
-HEADER_FORMAT = "<4s8I"
+FORMAT_VERSION = 5
+HEADER_FORMAT = "<4s9I"
 LIGHT_FORMAT = "<Ii5f8I"
 PARAMS_FORMAT = "<3If"
 KEY_FORMAT = "<2H3I"
@@ -44,8 +44,9 @@ RGB_MASK = 0xFFFFFF
 PLACEMENT_RECORD_SIZES = {
     3: {"params": 12, "key": 12, "layer": 60},
     4: {"params": 16, "key": 16, "layer": 108},
+    5: {"params": 16, "key": 16, "layer": 108},
 }
-PLACEMENT_HEADER_FORMATS = {3: "<4s7I", 4: "<4s8I"}
+PLACEMENT_HEADER_FORMATS = {3: "<4s7I", 4: "<4s8I", 5: "<4s9I"}
 
 BLP_MAGIC = b"BLP2"
 BLP_TYPE = 1
@@ -271,7 +272,7 @@ def read_placements(source):
 
 def pack_header(light_count, params_count, key_count, layer_count, zone_light_count, zone_point_count, curve_count):
     return struct.pack(HEADER_FORMAT, FILE_MAGIC, FORMAT_VERSION, light_count, params_count, key_count, layer_count,
-                       zone_light_count, zone_point_count, curve_count)
+                       zone_light_count, zone_point_count, curve_count, 0)
 
 
 def pack_params(params_id, first_key, key_count, glow):

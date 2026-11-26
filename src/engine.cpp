@@ -1,5 +1,10 @@
 #include "engine.h"
 
+#include "client_camera_focus.h"
+#include "client_light_bands.h"
+#include "client_map.h"
+#include "fog_data.h"
+#include "fog_data_choice.h"
 #include "local_light_stabiliser.h"
 
 #include "log.h"
@@ -49,7 +54,6 @@ constexpr uintptr_t kProjectionGlobal = 0x00ADF628;
 constexpr uintptr_t kCameraPosition = 0x00CD8F5C;
 constexpr uintptr_t kCameraTarget = 0x00CD8F68;
 constexpr uintptr_t kCameraInLiquid = 0x00CD8794;
-constexpr uintptr_t kCurrentMap = 0x00AB63BC;
 constexpr uintptr_t kWorldFrame = 0x00B7436C;
 constexpr uintptr_t kWorldFrameFarClip = 0xB14;
 
@@ -63,6 +67,8 @@ constexpr uintptr_t kAmbientColor = 0x00D38BD4;
 constexpr uintptr_t kDirectColor = 0x00D38BD8;
 constexpr uintptr_t kSunColor = 0x00D38BF8;
 constexpr uintptr_t kZoneFogDistance = 0x00D38C1C;
+constexpr uintptr_t kCurrentZoneId = 0x00BD080C;
+constexpr uintptr_t kCurrentZoneText = 0x00BD0788;
 constexpr uintptr_t kSunPosition = 0x00D38E28;
 constexpr uintptr_t kMoonPosition = 0x00D38E48;
 constexpr uintptr_t kSunDayEnd = 0x00A41CA0;
@@ -206,6 +212,49 @@ const CodeBytes kTransparentFogClientLayout[] = {
     {"glare pass return", 0x007F08B5, 1, {0xC3}},
 };
 
+const CodeBytes kM2ModelPlacementLayout[] = {
+    {"M2 draw element model into the batch state", 0x00823A1A, 6, {0x8B, 0x40, 0x04, 0x89, 0x46, 0x60}},
+    {"M2 model world matrix operand", 0x0082E349, 6, {0x8D, 0x96, 0xB4, 0x00, 0x00, 0x00}},
+    {"M2 model view matrix", 0x0082E354, 6, {0x8D, 0xBE, 0xF4, 0x00, 0x00, 0x00}},
+    {"M2 model view translation length", 0x0082E37F, 18,
+     {0xD9, 0x86, 0x2C, 0x01, 0x00, 0x00, 0xD9, 0x86, 0x28, 0x01, 0x00, 0x00, 0xD9, 0x86, 0x24, 0x01, 0x00, 0x00}},
+    {"M2 model camera distance store", 0x0082E3A2, 6, {0xD9, 0x9E, 0x88, 0x00, 0x00, 0x00}},
+};
+
+const CodeBytes kUnfoggedM2BatchLayout[] = {
+    {"M2 batch object in esi", 0x0081FB18, 2, {0x8B, 0xF1}},
+    {"M2 batch material read", 0x0081FB58, 6, {0x8B, 0x8E, 0x98, 0x00, 0x00, 0x00}},
+    {"M2 unfogged material flag test", 0x0081FB61, 3, {0xF6, 0x01, 0x02}},
+    {"M2 material blend mode read", 0x0081FB77, 4, {0x0F, 0xB7, 0x49, 0x02}},
+    {"M2 fog mode store and unfogged branch", 0x0081FB86, 14,
+     {0x3B, 0xC3, 0x89, 0x86, 0x80, 0x00, 0x00, 0x00, 0x0F, 0x84, 0x92, 0x01, 0x00, 0x00}},
+    {"M2 unfogged fog upload argument", 0x0081FD26, 3, {0x53, 0xDD, 0xD8}},
+    {"M2 unfogged fog upload argument pop", 0x0081FD2E, 3, {0x83, 0xC4, 0x04}},
+    {"fog upload prologue", 0x00873390, 12, {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x83, 0x7D, 0x08, 0x00, 0x74, 0x5D}},
+    {"fog upload of the stored fog", 0x008733C6, 11,
+     {0x68, 0x68, 0x30, 0xD4, 0x00, 0x6A, 0x1E, 0x6A, 0x00, 0xFF, 0xD2}},
+    {"stored fog write of the setter", 0x0087327F, 5, {0xA3, 0x68, 0x30, 0xD4, 0x00}},
+};
+
+const CodeBytes kWorldIntersectionCode[] = {
+    {"world intersection thunk", 0x0077F310, 9, {0x55, 0x8B, 0xEC, 0x5D, 0xE9, 0x57, 0x48, 0x02, 0x00}},
+    {"world intersection entry", 0x007A3B70, 16,
+     {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x18, 0x8B, 0x45, 0x18, 0x83, 0x05, 0xC4, 0x04, 0xCE, 0x00, 0x01}},
+};
+
+using WorldIntersectionFn = bool(__cdecl*)(const float* start, const float* end, float* hit, float* fraction,
+                                           uint32_t hitFlags, uint32_t unused);
+constexpr uintptr_t kWorldIntersection = 0x0077F310;
+constexpr uint32_t kGlareSightLineHitFlags = 0x00200112;
+constexpr float kGlareSightLineStart = 0.5f;
+
+constexpr uintptr_t kM2BatchMaterial = 0x98;
+constexpr uintptr_t kM2BatchModel = 0x60;
+constexpr uintptr_t kM2ModelWorldMatrix = 0xB4;
+constexpr uintptr_t kMatrixTranslationRow = 0x30;
+constexpr uintptr_t kM2ModelCameraDistanceSquared = 0x88;
+constexpr uintptr_t kM2MaterialBlendMode = 0x2;
+
 constexpr size_t kGlarePassEntrySize = 7;
 constexpr unsigned char kGlarePassEntry[kGlarePassEntrySize] = {0x83, 0x3D, 0xCC, 0x8C, 0xD3, 0x00, 0x00};
 constexpr unsigned char kJumpRel32Opcode = 0xE9;
@@ -224,6 +273,11 @@ struct OpaqueState
 OpaqueState g_opaque = {};
 uint32_t g_opaqueCaptures = 0;
 
+constexpr int32_t kUnreadableMap = -1;
+
+uintptr_t g_currentMap = kLoadingScreenMap;
+uintptr_t g_cameraFocus = kCameraPosition;
+
 template <typename T>
 T Read(uintptr_t address)
 {
@@ -235,6 +289,23 @@ T Read(uintptr_t address)
 void ReadFloats(uintptr_t address, float* out, int count)
 {
     std::memcpy(out, reinterpret_cast<const void*>(address), sizeof(float) * count);
+}
+
+bool ReadLoadedIntBand(uint32_t bandId, uint32_t keyIndex, uint32_t& rgb)
+{
+    return ReadClientIntBandValue({}, bandId, keyIndex, rgb);
+}
+
+void ReadZoneName(char* out, size_t size)
+{
+    out[0] = '\0';
+    const auto text = reinterpret_cast<const char*>(Read<uintptr_t>(kCurrentZoneText));
+    if (!text)
+        return;
+    size_t i = 0;
+    for (; i + 1 < size && text[i]; ++i)
+        out[i] = text[i];
+    out[i] = '\0';
 }
 
 bool Finite(const float* v, int count)
@@ -369,7 +440,7 @@ LightParamsSelection ReadLightParamsSelection()
 
 bool ReadClassicLightInputsUnsafe(ClassicLightInputs& out)
 {
-    out.mapId = Read<int32_t>(kCurrentMap);
+    out.mapId = Read<int32_t>(g_currentMap);
     ReadFloats(kCameraPosition, out.camPos, 3);
     out.dayFraction = Read<float>(kDayFraction);
     out.lightParams = ReadLightParamsSelection();
@@ -410,6 +481,7 @@ bool BuildFrameInputsUnsafe(FrameInputs& out, bool withPointLights, const PointL
     out.viewport = g_opaque.viewport;
     ReadFloats(kCameraPosition, out.camPos, 3);
     ReadFloats(kCameraTarget, out.camTarget, 3);
+    ReadFloats(g_cameraFocus, out.cameraFocus, 3);
 
     out.dayFraction = Read<float>(kDayFraction);
     float dayStart = Read<float>(kSunDayStart);
@@ -431,14 +503,23 @@ bool BuildFrameInputsUnsafe(FrameInputs& out, bool withPointLights, const PointL
     out.directColor = Read<uint32_t>(kDirectColor);
     out.ambientColor = Read<uint32_t>(kAmbientColor);
     out.inLiquid = CameraInLiquid();
-    out.mapId = Read<int32_t>(kCurrentMap);
+    out.mapId = Read<int32_t>(g_currentMap);
     out.lightParams = ReadLightParamsSelection();
     const LocalLightCamera lightCamera = FrameLightCamera(out);
     CaptureLocalLightInputs(lightCamera, withPointLights, upload, out.localLights);
     if (withPointLights)
-        FogLightStabiliser().Step(lightCamera, out.mapId, g_opaqueCaptures, ClockSeconds(), out.localLights);
+    {
+        const double seconds = ClockSeconds();
+        engine::MergeTwinPointLights(out.localLights, lightCamera.position, upload.reach);
+        engine::KeepStrongestCandidates(out.localLights);
+        FogLightStabiliser().Step(lightCamera, out.mapId, g_opaqueCaptures, seconds, out.localLights);
+    }
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
+    GlobalFogDataChoice().Decide(GlobalFogData(), ReadLoadedIntBand);
+    char zoneName[kZoneNameSize];
+    ReadZoneName(zoneName, sizeof(zoneName));
+    out.zoneHalo = GlobalZoneHalo().Advance(Read<int32_t>(kCurrentZoneId), zoneName, ClockSeconds());
     out.clientGlowAmount = out.inLiquid ? 0.0f : GlowScreenEffectAmount();
     out.farClip = out.glProjection[14] / (1.0f - out.glProjection[10]);
     if (!(out.farClip > 10.0f && out.farClip < 100000.0f))
@@ -737,6 +818,141 @@ void LogNewLiquid(const void* settings, bool read, const LiquidDescription& d, W
         VF_LOG_INFO("water: liquid type %u -> %s (sound bank %u, material %u, flags 0x%X, texture %s)", d.id,
                     WaterClassLabel(waterClass), d.soundBank, d.materialId, d.flags, d.texture0);
 }
+
+LayoutCheck g_worldIntersection = LayoutCheck::Unchecked;
+
+bool WorldIntersectionUsable()
+{
+    if (g_worldIntersection == LayoutCheck::Unchecked)
+        g_worldIntersection = AllCodeBytesMatch(kWorldIntersectionCode, "sun and moon sight line unavailable, their "
+                                                                         "fog halo and water glint stay unshadowed")
+                                  ? LayoutCheck::Matches
+                                  : LayoutCheck::Differs;
+    return g_worldIntersection == LayoutCheck::Matches;
+}
+
+bool WorldSegmentBlocked(const float* from, const float* to, float& fraction, bool& traced)
+{
+    __try
+    {
+        float hit[3] = {};
+        fraction = 1.0f;
+        const bool blocked = reinterpret_cast<WorldIntersectionFn>(kWorldIntersection)(
+            from, to, hit, &fraction, kGlareSightLineHitFlags, 0);
+        traced = std::isfinite(fraction);
+        return blocked;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        traced = false;
+        return false;
+    }
+}
+
+CelestialSightLine TraceCelestialSightLine(const float* camera, const float* toLight, float length)
+{
+    CelestialSightLine sight;
+    if (!WorldIntersectionUsable() || !(length > kGlareSightLineStart))
+        return sight;
+    float nearEnd[3];
+    float farEnd[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        nearEnd[i] = camera[i] + toLight[i] * kGlareSightLineStart;
+        farEnd[i] = camera[i] + toLight[i] * length;
+    }
+    float fraction = 1.0f;
+    bool traced = false;
+    sight.blocked = WorldSegmentBlocked(nearEnd, farEnd, fraction, traced);
+    if (traced && sight.blocked)
+    {
+        const bool blockedFromLight = WorldSegmentBlocked(farEnd, nearEnd, fraction, traced);
+        const float lengthBeyondStart = length - kGlareSightLineStart;
+        sight.farthestBlockAt = blockedFromLight ? length - std::clamp(fraction, 0.0f, 1.0f) * lengthBeyondStart
+                                                 : length;
+    }
+    if (!traced)
+    {
+        g_worldIntersection = LayoutCheck::Differs;
+        VF_LOG_ERROR("the client's world intersection at 0x%08X faulted; the sun's and moon's fog halo and water "
+                     "glint stay unshadowed",
+                     static_cast<unsigned>(kWorldIntersection));
+        return {};
+    }
+    sight.traced = true;
+    return sight;
+}
+
+CelestialShadow TrackCelestialShadow(const FrameInputs& in)
+{
+    static CelestialOcclusion occlusion;
+    const double now = ClockSeconds();
+    if (occlusion.SightLineDue(now, in.lightIsMoon, in.mapId))
+        occlusion.Observe(now, in.lightIsMoon, in.mapId, TraceCelestialSightLine(in.camPos, in.toLight, in.farClip));
+    occlusion.Advance(now);
+    return occlusion.Shadow();
+}
+
+bool BuildFrameInputsGuarded(FrameInputs& out, bool withPointLights, const PointLightUpload& upload)
+{
+    __try
+    {
+        return BuildFrameInputsUnsafe(out, withPointLights, upload);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+}
+
+void ChooseCurrentMap()
+{
+    g_currentMap = CurrentMapAddress({});
+    if (g_currentMap == kWorldMap)
+        VF_LOG_INFO("map id read from 0x%08X, the map the far clip setter 0x%08X reads",
+                    static_cast<unsigned>(kWorldMap), static_cast<unsigned>(kFarClipSetterMapRead));
+    else
+        VF_LOG_ERROR("the far clip setter's map read at 0x%08X differs from the 12340 client; the map id is read from "
+                     "the loading screen's 0x%08X, which holds -1 after a ship or zeppelin trip",
+                     static_cast<unsigned>(kFarClipSetterMapRead), static_cast<unsigned>(kLoadingScreenMap));
+}
+
+void ChooseCameraFocus()
+{
+    g_cameraFocus = CameraFocusReadable({}) ? kCameraFocus : kCameraPosition;
+    if (g_cameraFocus == kCameraFocus)
+        VF_LOG_INFO("camera focus read from 0x%08X, the position of the unit the camera follows",
+                    static_cast<unsigned>(kCameraFocus));
+    else
+        VF_LOG_ERROR("the camera focus stores at 0x%08X and 0x%08X differ from the 12340 client; the own character "
+                     "casts god-ray shafts",
+                     static_cast<unsigned>(kCameraFocusStore), static_cast<unsigned>(kCameraFocusHeightStore));
+}
+
+int CurrentMapId()
+{
+    __try
+    {
+        return Read<int32_t>(g_currentMap);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return kUnreadableMap;
+    }
+}
+
+bool ReadCameraPosition(float* position)
+{
+    __try
+    {
+        ReadFloats(kCameraPosition, position, 3);
+        return Finite(position, 3);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
 }
 
 bool IsSupportedClient()
@@ -935,16 +1151,10 @@ void ClearOpaqueState()
 
 bool BuildFrameInputs(FrameInputs& out, bool withPointLights, const PointLightUpload& upload)
 {
-    if (!g_opaque.valid)
+    if (!g_opaque.valid || !BuildFrameInputsGuarded(out, withPointLights, upload))
         return false;
-    __try
-    {
-        return BuildFrameInputsUnsafe(out, withPointLights, upload);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
+    out.celestialShadow = TrackCelestialShadow(out);
+    return true;
 }
 
 bool BuildWaterInputs(WaterInputs& out)
@@ -977,6 +1187,56 @@ bool WaterClientLayoutMatches()
 bool TransparentFogClientLayoutMatches()
 {
     return AllCodeBytesMatch(kTransparentFogClientLayout, "transparent fog hooks");
+}
+
+bool UnfoggedM2BatchLayoutMatches()
+{
+    return AllCodeBytesMatch(kUnfoggedM2BatchLayout, "unfogged M2 batch hook");
+}
+
+bool M2ModelPlacementLayoutMatches()
+{
+    return AllCodeBytesMatch(kM2ModelPlacementLayout, "M2 model placement");
+}
+
+bool ReadM2BatchModelPlacement(const void* batch, M2ModelPlacement& placement)
+{
+    if (!batch)
+        return false;
+    __try
+    {
+        const uintptr_t model = Read<uintptr_t>(reinterpret_cast<uintptr_t>(batch) + kM2BatchModel);
+        if (!model)
+            return false;
+        for (int axis = 0; axis < 3; ++axis)
+            placement.world[axis] =
+                Read<float>(model + kM2ModelWorldMatrix + kMatrixTranslationRow + axis * sizeof(float));
+        placement.cameraDistanceSquared = Read<float>(model + kM2ModelCameraDistanceSquared);
+        placement.model = model;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+bool ReadM2BatchBlendMode(const void* batch, uint16_t& blendMode)
+{
+    if (!batch)
+        return false;
+    __try
+    {
+        const uintptr_t material = Read<uintptr_t>(reinterpret_cast<uintptr_t>(batch) + kM2BatchMaterial);
+        if (!material)
+            return false;
+        blendMode = Read<uint16_t>(material + kM2MaterialBlendMode);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
 }
 
 void DescribeGlarePassEntry(char* text, size_t size)

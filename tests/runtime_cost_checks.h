@@ -70,17 +70,16 @@ void CheckDisabledTemporalSkipsHistoryPasses(Harness& h, Vec3 eye, Vec3 at, cons
     vf_test_set_config(&saved);
 }
 
-std::wstring FogLogBesideTheFogDll()
+std::wstring FogDllLog()
 {
     wchar_t path[MAX_PATH] = {};
-    const DWORD length = GetModuleFileNameW(GetModuleHandleW(L"LuxVelum.dll"), path, MAX_PATH);
-    const std::wstring module(path, length);
-    return module.substr(0, module.find_last_of(L"\\/") + 1) + L"LuxVelum.log";
+    MultiByteToWideChar(CP_ACP, 0, vf_test_log_path(), -1, path, MAX_PATH);
+    return path;
 }
 
 std::string LogWrittenSince(size_t offset)
 {
-    const std::string text = ReadText(FogLogBesideTheFogDll());
+    const std::string text = ReadText(FogDllLog());
     return text.size() > offset ? text.substr(offset) : std::string();
 }
 
@@ -129,9 +128,10 @@ void CheckDepthProbeAndGpuTimeLog(Harness& h, Vec3 eye, Vec3 at)
     probe.pp.BackBufferWidth = kProbeDeviceWidth;
     probe.pp.BackBufferHeight = kProbeDeviceHeight;
     probe.pp.hDeviceWindow = probe.window;
-    const DWORD engineFlags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
-    const bool created = probe.window && SUCCEEDED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, probe.window, engineFlags,
-                                                                       &probe.pp, &probe.dev)) && probe.dev;
+    const bool created = probe.window &&
+                         SUCCEEDED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, probe.window, kClientDeviceFlags,
+                                                       &probe.pp, &probe.dev)) &&
+                         probe.dev;
     Check(created, "a second fog device starts with a fresh renderer for the log checks");
     if (!created)
     {
@@ -147,7 +147,7 @@ void CheckDepthProbeAndGpuTimeLog(Harness& h, Vec3 eye, Vec3 at)
     EngineProjection(static_cast<float>(kProbeDeviceWidth) / kProbeDeviceHeight, proj);
     CameraRelativeLookAt(eye, at, view);
     const FrameInputs in = MakeInputs(view, proj, eye, at, world);
-    const size_t logStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t logStart = ReadText(FogDllLog()).size();
     bool rendered = true;
     auto frame = [&](const FrameInputs& input) {
         probe.BeginFrame();
@@ -184,7 +184,15 @@ void CheckDepthProbeAndGpuTimeLog(Harness& h, Vec3 eye, Vec3 at)
           "the frame summary reports the fog's GPU time from timestamp queries");
 
     probe.dev->Release();
+    const size_t beforeClose = ReadText(FogDllLog()).size();
     DestroyWindow(probe.window);
+    const bool attached = HasLine(LogWrittenSince(logStart), "overlay attached to window");
+    const bool closedLogged = HasLine(LogWrittenSince(beforeClose), kGameWindowClosedLine);
+    std::printf("     overlay attached %d, \"%s\" logged when the window closed %d\n", attached ? 1 : 0,
+                kGameWindowClosedLine, closedLogged ? 1 : 0);
+    Check(!attached || closedLogged,
+          "closing the game window the overlay is attached to logs that the game window closed, so an install can "
+          "tell a closed client from one still open");
     vf_test_set_config(&saved);
 }
 
@@ -201,7 +209,7 @@ std::string StormSummaryAtHarbour(Harness& h, Config config, bool classicNoise, 
     input.mapId = kEasternKingdoms;
     input.dayFraction = kNoon;
     input.lightParams = Storm(1.0f);
-    const size_t logStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t logStart = ReadText(FogDllLog()).size();
     h.BeginFrame();
     h.DrawScene(kHarbourEye, view, projection, world);
     const char* skip = "";
@@ -291,7 +299,8 @@ void CheckLocalLightLogLines(Harness& h)
     auto inputsWith = [&](int count) {
         FrameInputs inputs = empty;
         for (int i = 0; i < count; ++i)
-            engine::SelectLocalPointLight(inputs.localLights, lights[i], inputs.camPos, LocalLightUpload(config));
+            engine::SelectLocalPointLight(inputs.localLights, lights[i], inputs.camPos,
+                                          LocalLightUpload(config, CameraPlace(inputs)));
         return inputs;
     };
     const FrameInputs two = inputsWith(2);
@@ -305,7 +314,7 @@ void CheckLocalLightLogLines(Harness& h)
         h.dev->EndScene();
         h.dev->Present(nullptr, nullptr, nullptr, nullptr);
     };
-    const size_t logStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t logStart = ReadText(FogDllLog()).size();
     frame(two);
     const bool settling = !HasLine(LogWrittenSince(logStart), "local lights:");
     for (int i = 0; i < kFramesPastLightSetSettling; ++i)
@@ -322,13 +331,13 @@ void CheckLocalLightLogLines(Harness& h)
         vf_test_set_config(&config);
     };
     logLevel(2);
-    const size_t raisedStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t raisedStart = ReadText(FogDllLog()).size();
     frame(two);
     const std::string raisedLog = LogWrittenSince(raisedStart);
     logLevel(1);
     frame(two);
     logLevel(2);
-    const size_t raisedAgainStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t raisedAgainStart = ReadText(FogDllLog()).size();
     frame(two);
     const std::string raisedAgainLog = LogWrittenSince(raisedAgainStart);
     logLevel(1);
@@ -337,7 +346,7 @@ void CheckLocalLightLogLines(Harness& h)
               !HasLine(raisedLog, "  local light 2: ") && !HasLine(raisedAgainLog, "local light"),
           "raising LogLevel from 1 to 2 over the same uploaded point lights logs their per-light lines once");
 
-    const size_t flickerStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t flickerStart = ReadText(FogDllLog()).size();
     for (int i = 0; i < kFramesPastLightSetSettling; ++i)
         frame(i % 2 ? two : three);
     Check(rendered && !HasLine(LogWrittenSince(flickerStart), "local lights:"),
@@ -345,7 +354,7 @@ void CheckLocalLightLogLines(Harness& h)
 
     config.logLevel = 2;
     vf_test_set_config(&config);
-    const size_t debugStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t debugStart = ReadText(FogDllLog()).size();
     for (int i = 0; i < kFramesPastLightSetSettling; ++i)
         frame(three);
     const std::string debugLog = LogWrittenSince(debugStart);
@@ -360,7 +369,7 @@ void CheckLocalLightLogLines(Harness& h)
           "at LogLevel 2 each uploaded point light logs its position, distance, captured diffuse, attenuation, "
           "enabled flag, uploaded colour and reach");
 
-    const size_t emptyStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t emptyStart = ReadText(FogDllLog()).size();
     for (int i = 0; i < kFramesPastLightSetSettling; ++i)
         frame(empty);
     Check(rendered && CountOf(LogWrittenSince(emptyStart), "local lights: none uploaded") == 1,
@@ -369,7 +378,7 @@ void CheckLocalLightLogLines(Harness& h)
     FrameInputs rejected = empty;
     rejected.localLights.capture = LocalLightCapture::TableChanged;
     rejected.farClip = empty.farClip + kFarClipStepThatLogsASummary;
-    const size_t rejectedStart = ReadText(FogLogBesideTheFogDll()).size();
+    const size_t rejectedStart = ReadText(FogDllLog()).size();
     frame(rejected);
     const std::string firstRejectedFrame = LogWrittenSince(rejectedStart);
     for (int i = 0; i < kFramesPastLightSetSettling; ++i)

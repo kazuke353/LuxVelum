@@ -56,6 +56,16 @@ const SamplerStateValue kPointSampledClamp[] = {
 
 const D3DFORMAT kCurveFormats[] = {D3DFMT_R32F, D3DFMT_A32B32G32R32F};
 
+int g_failingSceneCopies = 0;
+
+bool TakeInjectedSceneCopyFailure()
+{
+    if (g_failingSceneCopies <= 0)
+        return false;
+    --g_failingSceneCopies;
+    return true;
+}
+
 template <typename T>
 void SafeRelease(T*& p)
 {
@@ -89,6 +99,27 @@ void BindPointSampled(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9*
     for (const SamplerStateValue& sampler : kPointSampledClamp)
         dev->SetSamplerState(stage, sampler.state, sampler.value);
 }
+
+constexpr DWORD kInjectedGradingFault = 0xE0564647;
+bool g_gradingFaultInjected = false;
+
+void RaiseInjectedGradingFault()
+{
+    if (!g_gradingFaultInjected)
+        return;
+    g_gradingFaultInjected = false;
+    RaiseException(kInjectedGradingFault, 0, 0, nullptr);
+}
+}
+
+void InjectGradingFault(bool injected)
+{
+    g_gradingFaultInjected = injected;
+}
+
+void FailGradingSceneCopies(int count)
+{
+    g_failingSceneCopies = count;
 }
 
 GradingRenderer::~GradingRenderer()
@@ -264,7 +295,7 @@ bool GradingRenderer::CopyWorld(IDirect3DDevice9* dev, IDirect3DSurface9* target
         return false;
     const RECT rect = ViewportRect(world);
     IDirect3DSurface9* copy = nullptr;
-    const bool copied = SUCCEEDED(m_sceneCopy->GetSurfaceLevel(0, &copy)) &&
+    const bool copied = !TakeInjectedSceneCopyFailure() && SUCCEEDED(m_sceneCopy->GetSurfaceLevel(0, &copy)) &&
                         SUCCEEDED(dev->StretchRect(target, &rect, copy, nullptr, D3DTEXF_POINT));
     SafeRelease(copy);
     return copied || Skip("scene copy failed");
@@ -289,30 +320,44 @@ void GradingRenderer::SetGradingState(IDirect3DDevice9* dev, const D3DVIEWPORT9&
     dev->SetPixelShaderConstantF(0, &constants[0][0], kGradingConstants);
 }
 
-void GradingRenderer::DrawGraded(IDirect3DDevice9* dev, const BoundTargets& bound, const D3DVIEWPORT9& world,
+void GradingRenderer::CaptureBoundState(IDirect3DDevice9* dev, BoundTargets& bound)
+{
+    dev->GetStreamSource(0, &bound.stream, &bound.streamOffset, &bound.streamStride);
+    m_state->Capture();
+    bound.captured = true;
+}
+
+void GradingRenderer::RestoreBoundTargets(IDirect3DDevice9* dev, BoundTargets& bound)
+{
+    if (bound.captured)
+    {
+        for (DWORD i = 1; i < kRenderTargets; ++i)
+            if (bound.colour[i])
+                dev->SetRenderTarget(i, bound.colour[i]);
+        m_state->Apply();
+        dev->SetDepthStencilSurface(bound.depth);
+        dev->SetStreamSource(0, bound.stream, bound.streamOffset, bound.streamStride);
+    }
+    for (IDirect3DSurface9*& colour : bound.colour)
+        SafeRelease(colour);
+    SafeRelease(bound.depth);
+    SafeRelease(bound.stream);
+}
+
+void GradingRenderer::DrawGraded(IDirect3DDevice9* dev, BoundTargets& bound, const D3DVIEWPORT9& world,
                                  float strength)
 {
-    IDirect3DVertexBuffer9* stream = nullptr;
-    UINT streamOffset = 0;
-    UINT streamStride = 0;
-    dev->GetStreamSource(0, &stream, &streamOffset, &streamStride);
-    m_state->Capture();
+    CaptureBoundState(dev, bound);
     for (DWORD i = 1; i < kRenderTargets; ++i)
         if (bound.colour[i])
             dev->SetRenderTarget(i, nullptr);
     dev->SetDepthStencilSurface(nullptr);
     SetGradingState(dev, world, strength);
+    RaiseInjectedGradingFault();
     DrawFullscreenTriangle(dev);
-    for (DWORD i = 1; i < kRenderTargets; ++i)
-        if (bound.colour[i])
-            dev->SetRenderTarget(i, bound.colour[i]);
-    m_state->Apply();
-    dev->SetDepthStencilSurface(bound.depth);
-    dev->SetStreamSource(0, stream, streamOffset, streamStride);
-    SafeRelease(stream);
 }
 
-bool GradingRenderer::GradeTarget(IDirect3DDevice9* dev, const BoundTargets& bound, const D3DVIEWPORT9& world,
+bool GradingRenderer::GradeTarget(IDirect3DDevice9* dev, BoundTargets& bound, const D3DVIEWPORT9& world,
                                   float strength)
 {
     D3DSURFACE_DESC desc = {};
@@ -340,9 +385,14 @@ bool GradingRenderer::Grade(IDirect3DDevice9* dev, const D3DVIEWPORT9& world, co
     for (DWORD i = 0; i < kRenderTargets; ++i)
         dev->GetRenderTarget(i, &bound.colour[i]);
     dev->GetDepthStencilSurface(&bound.depth);
-    const bool graded = GradeTarget(dev, bound, world, strength);
-    for (IDirect3DSurface9*& colour : bound.colour)
-        SafeRelease(colour);
-    SafeRelease(bound.depth);
+    bool graded = false;
+    __try
+    {
+        graded = GradeTarget(dev, bound, world, strength);
+    }
+    __finally
+    {
+        RestoreBoundTargets(dev, bound);
+    }
     return graded;
 }

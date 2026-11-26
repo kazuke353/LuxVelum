@@ -14,6 +14,16 @@ LocalLightCamera ForwardCamera()
     return ForwardViewCamera(kStabiliserNear, kStabiliserFar);
 }
 
+LocalLightCamera TurnedCamera(float yaw)
+{
+    LocalLightCamera camera = ForwardCamera();
+    camera.cameraRelativeView[0] = std::cos(yaw);
+    camera.cameraRelativeView[2] = std::sin(yaw);
+    camera.cameraRelativeView[8] = -std::sin(yaw);
+    camera.cameraRelativeView[10] = std::cos(yaw);
+    return camera;
+}
+
 void SetPeak(LocalPointLight& light, float peak)
 {
     light.color[0] = peak;
@@ -235,6 +245,33 @@ void CheckReusedNodeAddressIsANewLight()
     Check(twoLights && newWeight == 0.0f && oldWeight < 1.0f && stabiliser.Activity().admissions == 2,
           "the same node address 10 yd away is a new light: it takes a slot at once and fades in while the old one "
           "fades out");
+}
+
+void CheckLateCaptureMatchesTheNearestEntry()
+{
+    const LocalLightCamera camera = ForwardCamera();
+    LocalLightStabiliser stabiliser;
+    std::vector<LocalPointLight> lights = {StabiliserLight(1, 0.0f, 0.0f, 20.0f, 1.0f)};
+    LocalLightInputs inputs = CaptureOf(lights, camera);
+    StepFrame(stabiliser, camera, 0.0, inputs);
+    lights[0].position[0] = 10.0f;
+    inputs = CaptureOf(lights, camera);
+    StepFrame(stabiliser, camera, kStabiliserFrameSeconds, inputs);
+    inputs = CaptureOf(lights, camera);
+    StepFrame(stabiliser, camera, kStabiliserFrameSeconds + 0.3, inputs);
+    bool oldStaysBehind = false;
+    bool newGoesOn = false;
+    for (uint32_t i = 0; i < inputs.pointLightCount; ++i)
+    {
+        const float weight = inputs.pointLights[i].uploadedColor[0] / inputs.pointLights[i].color[0];
+        if (inputs.pointLights[i].position[0] == 0.0f)
+            oldStaysBehind = weight > 0.0f && weight < 1.0f;
+        else
+            newGoesOn = weight > 0.0f && weight < 1.0f;
+    }
+    Check(inputs.pointLightCount == 2 && oldStaysBehind && newGoesOn && stabiliser.Activity().admissions == 2,
+          "a capture 0.3 s late, whose wider identity radius reaches both the faded light and the new one at a "
+          "reused node address, continues the nearer one and leaves the other fading where it was");
 }
 
 void CheckLightsOutsideTheViewFreeTheirSlot()
@@ -523,6 +560,172 @@ void CheckNoSwapWhileASlotFadesOut()
           "evicting the weakest steady light");
 }
 
+void CheckEvictionWithoutHeirRampsBack()
+{
+    const LocalLightCamera camera = ForwardCamera();
+    LocalLightStabiliser stabiliser;
+    std::vector<LocalPointLight> lights = NineLightsAhead();
+    lights.pop_back();
+    LocalLightInputs inputs = CaptureOf(lights, camera);
+    StepFrame(stabiliser, camera, 0.0, inputs);
+    lights.push_back(StabiliserLight(9, 0.0f, 0.0f, 10.0f, 4.0f));
+    bool weakestKeptShining = true;
+    float weight = 0.0f;
+    for (int frame = 1; frame <= 2 * kFadeFrames; ++frame)
+    {
+        if (frame == 10)
+            lights.pop_back();
+        inputs = CaptureOf(lights, camera);
+        StepFrame(stabiliser, camera, frame * kStabiliserFrameSeconds, inputs);
+        weakestKeptShining = weakestKeptShining && Uploads(inputs, 8, &weight) && weight > 0.9f;
+    }
+    Check(weakestKeptShining && weight == 1.0f && stabiliser.Activity().evictions == 1 &&
+              stabiliser.Activity().admissions == 8 && stabiliser.Activity().fadeOuts == 0,
+          "an evicted light whose challenger leaves the client's table before taking the slot ramps back to full "
+          "strength instead of fading out and in again");
+}
+
+void CheckEvictionWhoseHeirTookAnotherSlotRampsBack()
+{
+    LocalLightStabiliser stabiliser;
+    std::vector<LocalPointLight> lights = {StabiliserLight(1, -300.0f, 0.0f, 300.0f, 8.0f)};
+    lights[0].attenuation[2] = 0.0001f;
+    for (uintptr_t i = 2; i <= 8; ++i)
+        lights.push_back(StabiliserLight(i, 0.0f, 0.0f, 20.0f + 2.0f * static_cast<float>(i), 0.3f));
+    LocalLightCamera camera = ForwardCamera();
+    LocalLightInputs inputs = CaptureInView(lights, camera);
+    StepFrame(stabiliser, camera, 0.0, inputs);
+    const bool eightSlotted = inputs.pointLightCount == 8 && Uploads(inputs, 1);
+    lights.push_back(StabiliserLight(9, 0.0f, 0.0f, 10.0f, 4.0f));
+    bool weakestKeptShining = true;
+    float weight = 0.0f;
+    for (int frame = 1; frame <= 2 * kFadeFrames; ++frame)
+    {
+        if (frame == 10)
+            camera = TurnedCamera(1.4f);
+        inputs = CaptureInView(lights, camera);
+        StepFrame(stabiliser, camera, frame * kStabiliserFrameSeconds, inputs);
+        weakestKeptShining = weakestKeptShining && Uploads(inputs, 8, &weight) && weight > 0.9f;
+    }
+    Check(eightSlotted && weakestKeptShining && weight == 1.0f && !Uploads(inputs, 1) && Uploads(inputs, 9) &&
+              stabiliser.Activity().evictions == 1 && stabiliser.Activity().admissions == 9 &&
+              stabiliser.Activity().fadeOuts == 0,
+          "an evicted light whose challenger takes the slot of a light the camera turned away from ramps back to "
+          "full strength instead of fading out and in again");
+}
+
+void CheckChallengerMissingSomeCapturesTakesTheSlot()
+{
+    constexpr int kMissedCaptureEvery = 7;
+    const LocalLightCamera camera = ForwardCamera();
+    LocalLightStabiliser stabiliser;
+    std::vector<LocalPointLight> lamps = NineLightsAhead();
+    lamps.pop_back();
+    LocalLightInputs inputs = CaptureOf(lamps, camera);
+    StepFrame(stabiliser, camera, 0.0, inputs);
+    std::vector<LocalPointLight> withChallenger = lamps;
+    withChallenger.push_back(StabiliserLight(9, 0.0f, 0.0f, 10.0f, 4.0f));
+    int tookTheSlot = 0;
+    int fullStrength = 0;
+    for (int frame = 1; frame <= 3 * kFadeFrames && !fullStrength; ++frame)
+    {
+        inputs = CaptureOf(frame % kMissedCaptureEvery ? withChallenger : lamps, camera);
+        StepFrame(stabiliser, camera, frame * kStabiliserFrameSeconds, inputs);
+        float weight = 0.0f;
+        if (!tookTheSlot && Uploads(inputs, 9) && !Uploads(inputs, 8) && inputs.pointLightCount == 8)
+            tookTheSlot = frame;
+        if (Uploads(inputs, 9, &weight) && weight == 1.0f)
+            fullStrength = frame;
+    }
+    Check(tookTheSlot && tookTheSlot <= kFadeFrames + 10 && fullStrength && stabiliser.Activity().evictions <= 2,
+          "a strong challenger missing from every seventh capture takes the weakest slot once it has faded and then "
+          "shines at full strength, instead of its eviction being called off at each miss");
+}
+
+void CheckMovingLightKeepsItsEntry()
+{
+    constexpr double kCaptureSeconds = 0.1;
+    constexpr float kMissileYardsPerSecond = 28.0f;
+    constexpr int kCaptures = 15;
+    const LocalLightCamera camera = ForwardCamera();
+    LocalLightStabiliser stabiliser;
+    LocalLightInputs inputs;
+    StepFrame(stabiliser, camera, 0.0, inputs);
+    LocalPointLight missile = StabiliserLight(1, 0.0f, 0.0f, 10.0f, 1.0f);
+    bool followed = true;
+    float previous = 0.0f;
+    float weight = 0.0f;
+    for (int capture = 1; capture <= kCaptures; ++capture)
+    {
+        const double seconds = capture * kCaptureSeconds;
+        missile.position[2] = 10.0f + kMissileYardsPerSecond * static_cast<float>(seconds);
+        inputs = CaptureOf({missile}, camera);
+        StepFrame(stabiliser, camera, seconds, inputs);
+        const LocalPointLight* uploaded = UploadedLight(inputs, 1);
+        followed = followed && inputs.pointLightCount == 1 && uploaded &&
+                   uploaded->position[2] == missile.position[2] && Uploads(inputs, 1, &weight) && weight >= previous;
+        previous = weight;
+    }
+    Check(followed && weight == 1.0f && stabiliser.Activity().admissions == 1 &&
+              stabiliser.Activity().fadeOuts == 0,
+          "a light moving 28 yd/s and captured every 0.1 s stays one light: it fades in where it is and shines at "
+          "full strength once the fade time has passed");
+}
+
+void CheckMovingLightKeepsItsEntryAcrossHeldCaptures()
+{
+    constexpr float kMissileYardsPerSecond = 28.0f;
+    constexpr int kFirstHeldFrame = 30;
+    constexpr int kLastHeldFrame = kFirstHeldFrame + static_cast<int>(kLocalLightHoldCaptures) - 1;
+    const LocalLightCamera camera = ForwardCamera();
+    LocalLightStabiliser stabiliser;
+    LocalPointLight missile = StabiliserLight(1, 0.0f, 0.0f, 10.0f, 1.0f);
+    LocalLightInputs inputs = CaptureOf({missile}, camera);
+    StepFrame(stabiliser, camera, 0.0, inputs);
+    bool followed = true;
+    for (int frame = 1; frame <= kLastHeldFrame + kHalfSecondFrames; ++frame)
+    {
+        const double seconds = frame * kStabiliserFrameSeconds;
+        missile.position[2] = 10.0f + kMissileYardsPerSecond * static_cast<float>(seconds);
+        const bool held = frame >= kFirstHeldFrame && frame <= kLastHeldFrame;
+        inputs = held ? LocalLightInputs{} : CaptureOf({missile}, camera);
+        if (held)
+            inputs.capture = LocalLightCapture::DamagedTable;
+        StepFrame(stabiliser, camera, seconds, inputs);
+        float weight = 0.0f;
+        const LocalPointLight* uploaded = UploadedLight(inputs, 1);
+        followed = followed && inputs.pointLightCount == 1 && uploaded && Uploads(inputs, 1, &weight) &&
+                   weight == 1.0f && (held || uploaded->position[2] == missile.position[2]);
+    }
+    Check(followed && stabiliser.Activity().heldCaptures == kLocalLightHoldCaptures &&
+              stabiliser.Activity().admissions == 1 && stabiliser.Activity().fadeOuts == 0,
+          "a light moving 28 yd/s at 60 fps stays one light at full strength across eight held captures that walked "
+          "nothing, as the identity radius grows with the time since the last capture that was matched");
+}
+
+void CheckChallengerMissingEveryFourthCaptureKeepsTheSlotLit()
+{
+    const LocalLightCamera camera = ForwardCamera();
+    LocalLightStabiliser stabiliser;
+    std::vector<LocalPointLight> lamps = NineLightsAhead();
+    lamps.pop_back();
+    LocalLightInputs inputs = CaptureOf(lamps, camera);
+    StepFrame(stabiliser, camera, 0.0, inputs);
+    std::vector<LocalPointLight> withChallenger = lamps;
+    withChallenger.push_back(StabiliserLight(9, 0.0f, 0.0f, 10.0f, 4.0f));
+    bool lit = true;
+    for (int frame = 1; frame <= 6 * kFadeFrames; ++frame)
+    {
+        inputs = CaptureOf(frame % 4 ? withChallenger : lamps, camera);
+        StepFrame(stabiliser, camera, frame * kStabiliserFrameSeconds, inputs);
+        float weight = 0.0f;
+        if (frame > 4 * kFadeFrames)
+            lit = lit && Uploads(inputs, 9, &weight) && weight >= 0.5f;
+    }
+    Check(lit, "a strong challenger missing from every fourth capture shines once it has taken the slot, and a slot "
+               "that faded to nothing is not handed back at the first missed capture");
+}
+
 void CheckLocalLightStabiliser()
 {
     CheckBoundaryChurnIsAbsorbed();
@@ -530,6 +733,7 @@ void CheckLocalLightStabiliser()
     CheckLightsFadeInOnceTheSceneRuns();
     CheckRejectedCapturesHoldTheLastSet();
     CheckReusedNodeAddressIsANewLight();
+    CheckLateCaptureMatchesTheNearestEntry();
     CheckLightsOutsideTheViewFreeTheirSlot();
     CheckLightLeavingTheViewFreesItsSlotAtOnce();
     CheckLightJitteringAtTheViewEdgeKeepsItsSlot();
@@ -540,5 +744,11 @@ void CheckLocalLightStabiliser()
     CheckAttenuationDriftKeepsOneLight();
     CheckSameFrameStepReplaysTheOutput();
     CheckNoSwapWhileASlotFadesOut();
+    CheckEvictionWithoutHeirRampsBack();
+    CheckEvictionWhoseHeirTookAnotherSlotRampsBack();
+    CheckChallengerMissingSomeCapturesTakesTheSlot();
+    CheckChallengerMissingEveryFourthCaptureKeepsTheSlotLit();
+    CheckMovingLightKeepsItsEntry();
+    CheckMovingLightKeepsItsEntryAcrossHeldCaptures();
 }
 }

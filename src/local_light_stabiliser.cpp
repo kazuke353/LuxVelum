@@ -8,7 +8,7 @@
 
 namespace
 {
-bool SameLight(const LocalPointLight& a, const LocalPointLight& b)
+double SquaredDistance(const LocalPointLight& a, const LocalPointLight& b)
 {
     double distanceSquared = 0.0;
     for (int i = 0; i < 3; ++i)
@@ -16,7 +16,12 @@ bool SameLight(const LocalPointLight& a, const LocalPointLight& b)
         const double delta = static_cast<double>(a.position[i]) - b.position[i];
         distanceSquared += delta * delta;
     }
-    return a.nativeId == b.nativeId && distanceSquared <= kLocalLightIdentityYards * kLocalLightIdentityYards;
+    return distanceSquared;
+}
+
+double IdentityYards(float dt)
+{
+    return kLocalLightIdentityYards + static_cast<double>(kLocalLightIdentitySpeed) * dt;
 }
 
 double Smoothed(double previous, double current, float dt)
@@ -54,7 +59,9 @@ void LocalLightStabiliser::Reset()
     m_count = 0;
     m_heldCount = 0;
     m_rejectedCaptures = 0;
+    m_orphanCaptures = 0;
     m_sceneStarting = true;
+    m_matched = false;
 }
 
 void LocalLightStabiliser::Step(const LocalLightCamera& camera, int mapId, uint32_t frame, double seconds,
@@ -85,10 +92,11 @@ void LocalLightStabiliser::Step(const LocalLightCamera& camera, int mapId, uint3
     }
     if (HoldOutput(lights))
         return;
-    MatchCandidates(camera, lights, dt);
+    MatchCandidates(camera, lights, AdvanceMatchClock(seconds));
     AdvanceWeights(dt);
     RemoveSpentEntries();
     FillFreeSlots();
+    CancelEvictionsWithoutHeirs();
     m_sceneStarting = false;
     ChallengeWeakestSlot();
     WriteOutput(lights);
@@ -99,6 +107,15 @@ void LocalLightStabiliser::Replay(LocalLightInputs& lights) const
 {
     std::memcpy(lights.pointLights, m_held, sizeof(m_held));
     lights.pointLightCount = m_heldCount;
+}
+
+float LocalLightStabiliser::AdvanceMatchClock(double seconds)
+{
+    const double elapsed =
+        m_matched ? std::clamp(seconds - m_lastMatchSeconds, 0.0, double{kLocalLightFadeSeconds}) : 0.0;
+    m_matched = true;
+    m_lastMatchSeconds = seconds;
+    return static_cast<float>(elapsed);
 }
 
 bool LocalLightStabiliser::HoldOutput(LocalLightInputs& lights)
@@ -123,12 +140,24 @@ bool LocalLightStabiliser::TakesFreeSlotBefore(const Entry& entry, const Entry& 
     return entry.smoothedPriority > other.smoothedPriority;
 }
 
-LocalLightStabiliser::Entry* LocalLightStabiliser::FindEntry(const LocalPointLight& light)
+LocalLightStabiliser::Entry* LocalLightStabiliser::FindEntry(const LocalPointLight& light, float dt)
 {
+    const double identityYards = IdentityYards(dt);
+    double nearestSquared = identityYards * identityYards;
+    Entry* nearest = nullptr;
     for (uint32_t i = 0; i < m_count; ++i)
-        if (SameLight(m_entries[i].light, light))
-            return &m_entries[i];
-    return nullptr;
+    {
+        Entry& entry = m_entries[i];
+        if (entry.light.nativeId != light.nativeId)
+            continue;
+        const double distanceSquared = SquaredDistance(entry.light, light);
+        if (distanceSquared <= nearestSquared && (!nearest || distanceSquared < nearestSquared))
+        {
+            nearest = &entry;
+            nearestSquared = distanceSquared;
+        }
+    }
+    return nearest;
 }
 
 LocalLightStabiliser::Entry* LocalLightStabiliser::AddEntry(const LocalPointLight& light, double priority)
@@ -157,7 +186,7 @@ void LocalLightStabiliser::MatchCandidates(const LocalLightCamera& camera, const
         const LocalPointLight& candidate = lights.candidates[i];
         const double priority = engine::LocalLightPriority(candidate, camera.position);
         const bool inView = PointLightMeetsView(candidate, camera);
-        Entry* entry = FindEntry(candidate);
+        Entry* entry = FindEntry(candidate, dt);
         if (!entry && !inView)
             continue;
         if (!entry)
@@ -172,6 +201,7 @@ void LocalLightStabiliser::MatchCandidates(const LocalLightCamera& camera, const
         entry->smoothedPriority = Smoothed(entry->smoothedPriority, priority, dt);
         entry->present = inView;
         entry->outOfView = !inView;
+        entry->absentCaptures = 0;
     }
     for (uint32_t i = 0; i < m_count; ++i)
     {
@@ -225,6 +255,71 @@ void LocalLightStabiliser::FillFreeSlots()
     }
 }
 
+uint32_t LocalLightStabiliser::AdoptOrphanedEvictions(const Entry& weakestEvicted, uint32_t orphans)
+{
+    uint32_t adopted = 0;
+    for (; adopted < orphans; ++adopted)
+    {
+        Entry* heir = nullptr;
+        for (uint32_t i = 0; i < m_count; ++i)
+        {
+            Entry& entry = m_entries[i];
+            if (entry.slotted || !entry.present || entry.heirToEvictedSlot ||
+                entry.smoothedPriority <= kLocalLightSwapMargin * weakestEvicted.smoothedPriority)
+                continue;
+            if (!heir || entry.smoothedPriority > heir->smoothedPriority)
+                heir = &entry;
+        }
+        if (!heir)
+            break;
+        heir->heirToEvictedSlot = true;
+        heir->challengeCaptures = 0;
+    }
+    return adopted;
+}
+
+void LocalLightStabiliser::CancelEvictionsWithoutHeirs()
+{
+    uint32_t evictions = 0;
+    uint32_t waitingHeirs = 0;
+    const Entry* weakestEvicted = nullptr;
+    for (uint32_t i = 0; i < m_count; ++i)
+    {
+        const Entry& entry = m_entries[i];
+        evictions += entry.slotted && entry.evicted ? 1 : 0;
+        waitingHeirs += !entry.slotted && entry.present && entry.heirToEvictedSlot ? 1 : 0;
+        if (entry.slotted && entry.evicted &&
+            (!weakestEvicted || entry.smoothedPriority < weakestEvicted->smoothedPriority))
+            weakestEvicted = &entry;
+    }
+    if (evictions > waitingHeirs)
+        waitingHeirs += AdoptOrphanedEvictions(*weakestEvicted, evictions - waitingHeirs);
+    if (evictions <= waitingHeirs)
+    {
+        m_orphanCaptures = 0;
+        return;
+    }
+    if (++m_orphanCaptures < kLocalLightSwapCaptures)
+        return;
+    m_orphanCaptures = 0;
+    CallOffLeastFadedEvictions(evictions - waitingHeirs);
+}
+
+void LocalLightStabiliser::CallOffLeastFadedEvictions(uint32_t count)
+{
+    for (; count > 0; --count)
+    {
+        Entry* leastFaded = nullptr;
+        for (uint32_t i = 0; i < m_count; ++i)
+        {
+            Entry& entry = m_entries[i];
+            if (entry.slotted && entry.evicted && (!leastFaded || entry.weight > leastFaded->weight))
+                leastFaded = &entry;
+        }
+        leastFaded->evicted = false;
+    }
+}
+
 void LocalLightStabiliser::ChallengeWeakestSlot()
 {
     uint32_t vacating = 0;
@@ -271,7 +366,9 @@ void LocalLightStabiliser::RemoveSpentEntries()
     {
         Entry entry = m_entries[i];
         const bool shining = entry.present && !entry.evicted && !entry.outOfView;
-        if (entry.slotted && entry.weight <= 0.0f && !shining)
+        const bool briefMiss = !entry.present && !entry.evicted && !entry.outOfView &&
+                               ++entry.absentCaptures < kLocalLightSwapCaptures;
+        if (entry.slotted && entry.weight <= 0.0f && !shining && !briefMiss)
         {
             if (!entry.outOfView)
                 ++m_activity.fadeOuts;

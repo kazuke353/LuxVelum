@@ -3,10 +3,12 @@
 #include <windows.h>
 #include <d3d9.h>
 
+#include "celestial_occlusion.h"
 #include "fog_data.h"
 #include "engine_actors.h"
 #include "engine_lights.h"
 #include "water_types.h"
+#include "zone_halo.h"
 
 #include <cstdint>
 
@@ -16,6 +18,7 @@ struct FrameInputs
     float glProjection[16];
     float camPos[3];
     float camTarget[3];
+    float cameraFocus[3];
     D3DVIEWPORT9 viewport;
     float dayFraction;
     float toLight[3];
@@ -33,6 +36,8 @@ struct FrameInputs
     int mapId;
     LightParamsSelection lightParams;
     LocalLightInputs localLights;
+    CelestialShadow celestialShadow;
+    ZoneHalo zoneHalo;
 };
 
 constexpr int kSkyColorCount = 6;
@@ -69,6 +74,8 @@ constexpr uintptr_t kM2BatchFogSite = 0x0081FD15;
 constexpr uintptr_t kM2BatchFogTarget = 0x00873210;
 constexpr uintptr_t kGlarePassSite = 0x004F9213;
 constexpr uintptr_t kGlarePassTarget = 0x007F0870;
+constexpr uintptr_t kM2UnfoggedBatchSite = 0x0081FD29;
+constexpr uintptr_t kM2FogUploadTarget = 0x00873390;
 
 constexpr uintptr_t kWaterPassSite = 0x00790AA2;
 constexpr uintptr_t kWaterPassTarget = 0x008A2240;
@@ -111,6 +118,10 @@ struct CodeRange
 };
 
 bool IsSupportedClient();
+void ChooseCurrentMap();
+void ChooseCameraFocus();
+int CurrentMapId();
+bool ReadCameraPosition(float* position);
 void* GameD3DDevice();
 bool CameraInLiquid();
 
@@ -145,6 +156,18 @@ bool BuildFrameInputs(FrameInputs& out, bool withPointLights, const PointLightUp
 bool BuildWaterInputs(WaterInputs& out);
 bool WaterClientLayoutMatches();
 bool TransparentFogClientLayoutMatches();
+bool UnfoggedM2BatchLayoutMatches();
+bool ReadM2BatchBlendMode(const void* batch, uint16_t& blendMode);
+
+struct M2ModelPlacement
+{
+    uintptr_t model = 0;
+    float world[3] = {};
+    float cameraDistanceSquared = 0.0f;
+};
+
+bool M2ModelPlacementLayoutMatches();
+bool ReadM2BatchModelPlacement(const void* batch, M2ModelPlacement& placement);
 void DescribeGlarePassEntry(char* text, size_t size);
 bool TransparentLiquidsQueued(const void* liquidRenderer);
 WaterClass ClassifyWaterSettings(const void* liquidSettings);

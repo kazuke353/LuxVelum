@@ -5,6 +5,8 @@
 constexpr float kEngineFarClipMin = 183.333f;
 constexpr float kEngineFarClipMax = 1583.33f;
 constexpr float kFarClipMaxKeepsClientCap = 0.0f;
+constexpr float kRegionLocalLightsMax = 128.0f;
+constexpr float kRegionLocalLightsSliderMax = 96.0f;
 
 constexpr unsigned kVirtualKeyF7 = 0x76;
 
@@ -17,9 +19,11 @@ struct Hotkey
 };
 
 constexpr Hotkey kDefaultOverlayHotkey = {kVirtualKeyF7, true, false, false};
+constexpr Hotkey kNoHotkey = {0, false, false, false};
 
 bool ParseHotkey(const char* text, Hotkey& out);
 std::string HotkeyName(const Hotkey& key);
+bool IsHotkeySet(const Hotkey& key);
 
 struct Config
 {
@@ -28,18 +32,34 @@ struct Config
     bool lightStay = true;
     bool overlay = true;
     Hotkey overlayKey = kDefaultOverlayHotkey;
+    Hotkey toggleKey = kNoHotkey;
     int quality = 2;
     float density = 1.0f;
     float haze = 1.0f;
     float groundFog = 0.6f;
     float farFog = 1.0f;
     int stockFog = 1;
-    bool transparentFog = false;
+    bool transparentFog = true;
     int dataMode = 1;
+    float azerothDensity = 1.0f;
+    float outlandDensity = 0.15f;
+    float northrendDensity = 0.15f;
+    float tbcStartDensity = 1.0f;
+    int outlandClassicFog = 1;
+    int northrendClassicFog = 1;
+    float azerothSkyColor = 0.0f;
+    float outlandSkyColor = 0.0f;
+    float northrendSkyColor = 0.0f;
+    float tbcStartSkyColor = 0.0f;
+    float azerothLocalLights = 1.0f;
+    float outlandLocalLights = 8.0f;
+    float northrendLocalLights = 8.0f;
+    float tbcStartLocalLights = 2.5f;
     int colorSpace = 1;
     int classicPhase = 0;
     float sunScatter = 1.0f;
     float sunShadow = 1.0f;
+    float moonScatter = 0.2f;
     float ambient = 1.0f;
     float exposure = 1.0f;
     float classicExposure = 1.0f;
@@ -52,7 +72,7 @@ struct Config
     float noiseAmount = 0.15f;
     float noiseScale = 0.025f;
     float noiseWindSpeed = 0.5f;
-    bool classicNoise = true;
+    bool classicNoise = false;
     float godRays = 0.0f;
     bool glowCompensation = true;
     int foreverGlow = 0;
@@ -63,6 +83,7 @@ struct Config
     bool underwater = false;
     bool liquidDepth = true;
     bool multisampling = true;
+    bool dxvkAmdVendor = true;
     int debugView = 0;
     bool sunMarker = false;
     int logLevel = 1;
@@ -72,7 +93,9 @@ struct Config
     float waterWind = 2.0f;
     float waterFoam = 1.0f;
     float waterReflections = 1.0f;
+    float waterReflectionWaviness = 0.35f;
     float waterSpecular = 1.0f;
+    float waterMoonGlint = 6.0f;
     float waterClarity = 1.0f;
     float waterZoneColors = 0.5f;
     float waterRipples = 0.5f;
@@ -111,5 +134,5 @@ private:
     Config m_logged;
 };
 
-const char* AdoptEarlierSettings(const std::string& directory);
+const char* AdoptEarlierSettings(const std::string& directory, const std::string& ini);
 ConfigStore& GlobalConfig();

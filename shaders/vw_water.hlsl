@@ -64,7 +64,7 @@ float4 main(float2 pixelIndex : VPOS) : COLOR0
     float3 foam = FoamLight(N, waves.foam.x) * foamAlbedo.rgb + inscatter;
     float3 colour = lerp(water, foam, foamAlbedo.a);
 
-    float3 R = ReflectedDirection(V, N);
+    float3 R = ReflectedDirection(V, ReflectionRayNormal(waves.moments.xy));
     float2 hitUv;
     float4 screenReflection = TraceScreenReflection(w, pixel, R, hitUv);
     float3 sky = 0;
@@ -76,7 +76,8 @@ float4 main(float2 pixelIndex : VPOS) : COLOR0
     float3 environment = reflected * EnvironmentBrdf(envRoughness, NoV) * ReflectionStrength();
     float3 H = normalize(V + L);
     float environmentAttenuation = 1 - FresnelSchlick(dot(H, V)) * SunVisibility();
-    float3 sunSpecular = SunVisibility() * SunColour() * SpecularStrength() * SunGlint(sunRoughness, N, V, L);
+    float3 sunSpecular = SunVisibility() * (1 - GlintShadowAt(w.cameraDistance)) * SunColour() * SpecularStrength() *
+                         SunGlint(sunRoughness, N, V, L);
     colour += sunSpecular + environmentAttenuation * environment;
 
     [branch] if (WaterDebugView() > 0.5)

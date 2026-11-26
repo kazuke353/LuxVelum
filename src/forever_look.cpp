@@ -2,7 +2,9 @@
 
 #include "config.h"
 #include "d3d9_wrap.h"
+#include "fog_model.h"
 #include "log.h"
+#include "luxvelum_switch.h"
 #include "status_log.h"
 
 #include <windows.h>
@@ -15,12 +17,14 @@ namespace
 {
 constexpr float kGlowByteScale = 255.0f;
 constexpr unsigned kDebugSummaryFrames = 600;
+constexpr int kNoClassicLightMap = -1;
 constexpr const char* kGradingOff = "off";
+constexpr const char* kSwitchedOff = "Luxvelum is switched off";
 constexpr const char* kGhostEffect = "ghost effect";
 constexpr const char* kCameraUnderWater = "camera under water";
 constexpr const char* kNoClassicLight = "no Classic light covers the camera";
 constexpr const char* kNoGradedClassicLight = "no Classic light around the camera carries a grading curve";
-constexpr const char* kStoppedAfterException = "stopped after an exception, see LuxVelum.log";
+constexpr const char* kStoppedAfterException = "stopped after an exception, see Luxvelum.log";
 
 struct GlowWrite
 {
@@ -75,14 +79,15 @@ bool LookNeeded(const Config& cfg)
     return cfg.foreverGlow != 0 || cfg.colorGrading > 0.0f;
 }
 
-ForeverLook ResolveForeverLook()
+ForeverLook ResolveForeverLook(const Config& cfg)
 {
     ForeverLook look;
     engine::ClassicLightInputs light;
     if (!GlobalFogData().Loaded() || !engine::ReadClassicLightInputs(light))
         return look;
     AuthoredFog fog = {};
-    GlobalFogData().Resolve(light.mapId, light.camPos, light.dayFraction, light.lightParams, fog);
+    const int lightMap = UsesFogData(cfg, PlaceOf(light.mapId, light.camPos)) ? light.mapId : kNoClassicLightMap;
+    GlobalFogData().Resolve(lightMap, light.camPos, light.dayFraction, light.lightParams, fog);
     look.valid = std::isfinite(fog.coverage) && std::isfinite(fog.glow);
     look.coverage = fog.coverage;
     look.hasGlow = fog.hasGlow;
@@ -98,7 +103,7 @@ ForeverLookFrame GameForeverLookFrame(const Config& cfg)
     frame.effects = engine::ReadScreenEffects();
     frame.cameraInLiquid = engine::CameraInLiquid();
     if (LookNeeded(cfg))
-        frame.look = ResolveForeverLook();
+        frame.look = ResolveForeverLook(cfg);
     return frame;
 }
 
@@ -122,7 +127,7 @@ bool g_gradingFailed = false;
 GlowFrame g_glow;
 GradingFrame g_grading;
 FrameRead g_frameRead;
-FogDevice* g_gradedDevice = nullptr;
+FogDevice* g_gradingDevice = nullptr;
 ForeverLookStatus g_status;
 StatusLog g_gradingLog;
 bool g_loggedGlowOverride = false;
@@ -261,8 +266,8 @@ void RecordGrading(GradingState state, const char* reason, float strength)
 
 void ReleaseGradingWhenOff()
 {
-    FogDevice* device = g_gradedDevice;
-    g_gradedDevice = nullptr;
+    FogDevice* device = g_gradingDevice;
+    g_gradingDevice = nullptr;
     if (device && device == g_client.device())
         ReleaseGrading(device);
 }
@@ -271,11 +276,11 @@ void GradeWorldFrame()
 {
     const GradingFrame grading = g_grading;
     g_grading = GradingFrame();
-    if (GlobalConfig().Get().colorGrading <= 0.0f)
+    if (GlobalConfig().Get().colorGrading <= 0.0f || LuxvelumSwitchedOff())
     {
         ReleaseGradingWhenOff();
         g_status.graded = false;
-        g_status.grading = kGradingOff;
+        g_status.grading = LuxvelumSwitchedOff() ? kSwitchedOff : kGradingOff;
         return;
     }
     if (grading.state == GradingState::NoWorld)
@@ -286,12 +291,11 @@ void GradeWorldFrame()
         return;
     }
     FogDevice* device = g_client.device();
+    if (device)
+        g_gradingDevice = device;
     const char* skip = "";
     if (GradeWorld(device, grading.viewport, grading.curve, grading.strength, &skip))
-    {
-        g_gradedDevice = device;
         RecordGrading(GradingState::Ready, "", grading.strength);
-    }
     else
         RecordGrading(GradingState::Skipped, skip && *skip ? skip : "the grading pass could not draw", 0.0f);
 }
@@ -352,11 +356,23 @@ void FeedGlowGuarded(const ForeverLookFrame& frame, const Config& cfg)
     }
 }
 
+void LeaveTheClientsGlow()
+{
+    g_glow = GlowFrame();
+    RecordGlowStatus();
+    LogGlowOverride();
+}
+
 bool ReadFrameAndFeedGlowOnce()
 {
     if (g_frameRead.attempted)
         return g_frameRead.read;
     g_frameRead.attempted = true;
+    if (LuxvelumSwitchedOff())
+    {
+        LeaveTheClientsGlow();
+        return false;
+    }
     g_frameRead.read = ReadFrame(g_frameRead.frame);
     if (!g_frameRead.read)
     {

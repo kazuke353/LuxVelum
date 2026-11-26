@@ -4,10 +4,14 @@
 
 constexpr uint32_t kMaxLocalPointLights = 8;
 constexpr uint32_t kLocalLightCandidatePool = 24;
+constexpr uint32_t kLocalLightCapturePool = 2 * kLocalLightCandidatePool;
 constexpr float kLocalPointLightContributionCutoff = 1.0f / 256.0f;
 constexpr float kMaxLocalPointLightRadius = 200.0f;
 constexpr float kLocalLightGamma = 2.2f;
-
+constexpr float kTwinPointLightYards = 2.5f;
+constexpr float kTwinPointLightSpanYards = 5.0f;
+constexpr float kTwinAttenuationTolerance = 0.1f;
+constexpr float kTwinChromaTolerance = 0.15f;
 constexpr uintptr_t kWmoInstanceRoot = 0xF4;
 constexpr uintptr_t kWmoRootLoaded = 0x1E0;
 constexpr uintptr_t kWmoRootGroupCount = 0x1F4;
@@ -34,6 +38,7 @@ struct PointLightUpload
 {
     bool linear = true;
     float intensity = 1.0f;
+    float reach = 1.0f;
 };
 
 struct LocalLightCamera
@@ -52,6 +57,7 @@ struct LocalPointLight
     float cutoff = 0.0f;
     uint32_t enabled = 1;
     uintptr_t nativeId = 0;
+    uint32_t mergedLights = 1;
 };
 
 enum class LocalLightCapture : uint32_t
@@ -70,10 +76,11 @@ struct LocalLightInputs
 {
     LocalPointLight pointLights[kMaxLocalPointLights] = {};
     uint32_t pointLightCount = 0;
-    LocalPointLight candidates[kLocalLightCandidatePool] = {};
+    LocalPointLight candidates[kLocalLightCapturePool] = {};
     uint32_t candidateCount = 0;
     uint32_t skippedDisabled = 0;
     uint32_t skippedNonPoint = 0;
+    uint32_t mergedTwins = 0;
     float interiorBlend = 0.0f;
     bool cameraInterior = false;
     LocalLightCapture capture = LocalLightCapture::Captured;
@@ -84,12 +91,14 @@ bool PointLightMeetsView(const LocalPointLight& light, const LocalLightCamera& c
 namespace engine
 {
 void UploadedPointLightColor(const float captured[3], const PointLightUpload& upload, float uploaded[3]);
-float PointLightCutoff(const float color[3], const float attenuation[3]);
+float PointLightCutoff(const float color[3], const float attenuation[3], float reach = 1.0f);
 double LocalLightPriority(const LocalPointLight& light, const float cameraPosition[3]);
 bool SelectLocalPointLight(LocalLightInputs& out, const LocalPointLight& light, const float cameraPosition[3],
                            const PointLightUpload& upload);
 bool SelectLocalPointLightInView(LocalLightInputs& out, const LocalPointLight& light,
                                  const LocalLightCamera& camera, const PointLightUpload& upload);
+uint32_t MergeTwinPointLights(LocalLightInputs& lights, const float cameraPosition[3], float reach);
+void KeepStrongestCandidates(LocalLightInputs& lights);
 bool CapturedLightsUsable(LocalLightCapture capture);
 const char* LocalLightCaptureName(LocalLightCapture capture);
 LocalLightCapture CapturePointLightTable(uintptr_t sceneSlot, const LocalLightCamera& camera,

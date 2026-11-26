@@ -2,8 +2,10 @@
 
 #include "config.h"
 #include "d3d9_wrap.h"
+#include "game_window_log.h"
 #include "hooks.h"
 #include "log.h"
+#include "luxvelum_switch.h"
 #include "settings_panel.h"
 
 #include "imgui.h"
@@ -40,6 +42,8 @@ struct OverlayState
     bool visible = false;
     bool failed = false;
     unsigned swallowedKey = 0;
+    void (*swallowedKeyAction)() = nullptr;
+    bool swallowsHotkeyCharacters = false;
     UINT backBufferWidth = 0;
     UINT backBufferHeight = 0;
     float scale = 0.0f;
@@ -187,6 +191,12 @@ bool IsCharacterMessage(UINT msg)
     return msg == WM_CHAR || msg == WM_SYSCHAR || msg == WM_DEADCHAR || msg == WM_SYSDEADCHAR;
 }
 
+bool IsFocusLoss(UINT msg, WPARAM wParam)
+{
+    return msg == WM_KILLFOCUS || (msg == WM_ACTIVATEAPP && wParam == FALSE) ||
+           (msg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE);
+}
+
 bool IsMouseClickOrWheelMessage(UINT msg)
 {
     return msg > WM_MOUSEMOVE && msg <= WM_MOUSELAST;
@@ -279,7 +289,7 @@ bool IsModifierKey(unsigned virtualKey)
            (virtualKey >= VK_LSHIFT && virtualKey <= VK_RMENU) || virtualKey == VK_LWIN || virtualKey == VK_RWIN;
 }
 
-void LogShortcutKeyArrival(const Hotkey& hotkey, UINT msg, WPARAM wParam, LPARAM lParam)
+void LogShortcutKeyArrival(const Config& cfg, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (!IsKeyDownMessage(msg) || (lParam & kKeyWasDownBit))
         return;
@@ -291,11 +301,12 @@ void LogShortcutKeyArrival(const Hotkey& hotkey, UINT msg, WPARAM wParam, LPARAM
     const unsigned virtualKey = static_cast<unsigned>(wParam);
     const Hotkey pressed = {virtualKey, ModifierDown(VK_CONTROL), ModifierDown(VK_SHIFT), ModifierDown(VK_MENU)};
     const bool shortcut = (pressed.ctrl || pressed.alt || pressed.shift) && !IsTypedKey(virtualKey);
-    if ((virtualKey != hotkey.virtualKey && !shortcut) || IsModifierKey(virtualKey) ||
-        g_overlay.loggedShortcutKeys >= kMaxLoggedShortcutKeys)
+    const bool hotkey = virtualKey == cfg.overlayKey.virtualKey || virtualKey == cfg.toggleKey.virtualKey;
+    if ((!hotkey && !shortcut) || IsModifierKey(virtualKey) || g_overlay.loggedShortcutKeys >= kMaxLoggedShortcutKeys)
         return;
     ++g_overlay.loggedShortcutKeys;
-    VF_LOG_INFO("overlay: %s pressed (OverlayKey is %s)", HotkeyName(pressed).c_str(), HotkeyName(hotkey).c_str());
+    VF_LOG_INFO("overlay: %s pressed (OverlayKey is %s, ToggleKey %s)", HotkeyName(pressed).c_str(),
+                HotkeyName(cfg.overlayKey).c_str(), HotkeyName(cfg.toggleKey).c_str());
 }
 
 void LogDrawSkip(DrawSkip reason, const char* what, HRESULT hr)
@@ -306,23 +317,40 @@ void LogDrawSkip(DrawSkip reason, const char* what, HRESULT hr)
     VF_LOG_INFO("overlay not drawn: %s (0x%08X)", what, static_cast<unsigned>(hr));
 }
 
-bool TakesHotkey(const Hotkey& key, UINT msg, WPARAM wParam, LPARAM lParam)
+void ForgetSwallowedKey()
 {
-    if (HotkeyPressed(key, msg, wParam))
+    g_overlay.swallowedKey = 0;
+    g_overlay.swallowedKeyAction = nullptr;
+    g_overlay.swallowsHotkeyCharacters = false;
+}
+
+void FlipOverlay()
+{
+    SetVisible(!g_overlay.visible);
+}
+
+bool TakesHotkey(const Hotkey& key, void (*pressed)(), UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (IsHotkeySet(key) && HotkeyPressed(key, msg, wParam))
     {
         if (!(lParam & kKeyWasDownBit))
-            SetVisible(!g_overlay.visible);
+            pressed();
         g_overlay.swallowedKey = static_cast<unsigned>(wParam);
+        g_overlay.swallowedKeyAction = pressed;
+        g_overlay.swallowsHotkeyCharacters = true;
         return true;
     }
     if (!g_overlay.swallowedKey)
         return false;
-    if (IsKeyUpMessage(msg) && (wParam == g_overlay.swallowedKey || IsHotkeyKey(key, wParam)))
+    const bool swallowedByThisKey = g_overlay.swallowedKeyAction == pressed;
+    if (IsKeyUpMessage(msg) && swallowedByThisKey && (wParam == g_overlay.swallowedKey || IsHotkeyKey(key, wParam)))
     {
-        g_overlay.swallowedKey = 0;
+        ForgetSwallowedKey();
         return true;
     }
-    return IsCharacterMessage(msg);
+    if (IsKeyDownMessage(msg) && wParam != g_overlay.swallowedKey && !IsModifierKey(static_cast<unsigned>(wParam)))
+        g_overlay.swallowsHotkeyCharacters = false;
+    return g_overlay.swallowsHotkeyCharacters && IsCharacterMessage(msg);
 }
 
 bool PanelWantsMessage(UINT msg)
@@ -338,13 +366,15 @@ bool PanelWantsMessage(UINT msg)
 bool PanelTakesMessage(HWND window, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     const Config& cfg = GlobalConfig().Get();
+    LogShortcutKeyArrival(cfg, msg, wParam, lParam);
+    if (TakesHotkey(cfg.toggleKey, &FlipLuxvelumSwitch, msg, wParam, lParam))
+        return true;
     if (!cfg.overlay)
     {
         SetVisible(false);
         return false;
     }
-    LogShortcutKeyArrival(cfg.overlayKey, msg, wParam, lParam);
-    if (TakesHotkey(cfg.overlayKey, msg, wParam, lParam))
+    if (TakesHotkey(cfg.overlayKey, &FlipOverlay, msg, wParam, lParam))
         return true;
     if (!g_overlay.visible)
         return false;
@@ -361,6 +391,8 @@ bool OverlayTakesMessage(HWND window, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (g_overlay.failed || !g_overlay.device)
         return false;
+    if (IsFocusLoss(msg, wParam))
+        ForgetSwallowedKey();
     return KeepsButtonWithItsDown(msg, wParam, PanelTakesMessage(window, msg, wParam, lParam));
 }
 
@@ -389,6 +421,8 @@ LRESULT CALLBACK OverlayWindowProc(HWND window, UINT msg, WPARAM wParam, LPARAM 
     const SubclassedWindow subclass = g_subclass;
     if (window == subclass.window && OverlayTakesMessageGuarded(window, msg, wParam, lParam))
         return 0;
+    if (msg == WM_DESTROY && window == subclass.window)
+        VF_LOG_INFO("%s", kGameWindowClosedLine);
     if (msg == WM_NCDESTROY && window == subclass.window)
         g_subclass = SubclassedWindow();
     return subclass.unicode ? CallWindowProcW(subclass.clientProc, window, msg, wParam, lParam)
@@ -631,8 +665,9 @@ void AttachOverlay(IDirect3DDevice9* device, HWND window)
     }
     ImGui_ImplDX9_Init(device);
     g_overlay.device = device;
-    VF_LOG_INFO("overlay attached to window %p; %s opens it", static_cast<void*>(window),
-                HotkeyName(GlobalConfig().Get().overlayKey).c_str());
+    const Config& cfg = GlobalConfig().Get();
+    VF_LOG_INFO("overlay attached to window %p; OverlayKey %s, ToggleKey %s", static_cast<void*>(window),
+                HotkeyName(cfg.overlayKey).c_str(), HotkeyName(cfg.toggleKey).c_str());
 }
 
 void DetachOverlay(IDirect3DDevice9* device)
@@ -672,6 +707,12 @@ void DrawOverlay(IDirect3DDevice9* device)
 bool OverlayVisible()
 {
     return g_overlay.visible;
+}
+
+bool OverlayCanSwitchLuxvelumOn()
+{
+    const Config& cfg = GlobalConfig().Get();
+    return !g_overlay.failed && g_overlay.device && (cfg.overlay || IsHotkeySet(cfg.toggleKey));
 }
 
 PanelPlacement OverlayPanelPlacement()

@@ -7,6 +7,8 @@
 #include "fog_model.h"
 #include "forever_look.h"
 #include "log.h"
+#include "luxvelum_switch.h"
+#include "overlay.h"
 #include "transparent_fog.h"
 #include "water_classify.h"
 #include "water_renderer.h"
@@ -18,10 +20,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace
 {
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
+using M2FogSetterFn = void(__cdecl*)(float start, float end, float exponent, const uint32_t* colour);
 using WaterMaterialRenderFn = void(__thiscall*)(void* material, void* environment, void* geometry, void* aux,
                                                 const float* cameraPosition, const float* world, const float* bounds,
                                                 void* liquidSettings);
@@ -39,6 +43,7 @@ constexpr unsigned kFlatWavesBit = 1u << 31;
 constexpr const char* kCameraUnderLiquid = "camera under liquid";
 constexpr const char* kWorldNotCaptured = "the world render inputs were not captured";
 constexpr const char* kInvalidFrameInputs = "invalid frame inputs";
+constexpr const char* kSwitchedOff = "Luxvelum is switched off";
 constexpr DWORD kTransparentFogStatsIntervalMs = 60000;
 constexpr size_t kGlarePassEntryTextSize = 64;
 constexpr double kPercent = 100.0;
@@ -60,12 +65,23 @@ StatusLog g_fogLog;
 StatusLog g_godRayLog;
 
 uintptr_t g_m2BatchFogTarget = engine::kM2BatchFogTarget;
+uintptr_t g_m2FogUploadTarget = engine::kM2FogUploadTarget;
 uintptr_t g_glarePassTarget = engine::kGlarePassTarget;
 uintptr_t g_worldTextDrawTarget = engine::kWorldTextDrawTarget;
 int g_m2BatchFogObserved = 0;
 bool g_transparentFogHooksInstalled = false;
+bool g_objectFogPlacement = false;
 bool g_transparentFogFailed = false;
 StatusLog g_transparentFogLog;
+
+constexpr int kObjectFogsPerFrame = 256;
+
+struct CachedObjectFog
+{
+    uintptr_t model;
+    bool fitted;
+    ObjectFog fog;
+};
 
 struct TransparentFogFrame
 {
@@ -75,7 +91,10 @@ struct TransparentFogFrame
     bool drawnBeforeWorldText;
     bool armed;
     bool glareDrawn;
+    bool glareReturned;
     StockFogFit fit;
+    int objectCount;
+    CachedObjectFog objects[kObjectFogsPerFrame];
 };
 
 TransparentFogFrame g_transparentFog = {};
@@ -101,6 +120,11 @@ struct TransparentFogStats
     unsigned glareDrawnEarly;
     unsigned glareCallsPassed;
     unsigned glareCallsSkipped;
+    unsigned unfoggedBatches;
+    unsigned unfoggedBatchesFogged;
+    unsigned worldTextBeforeGlare;
+    unsigned batchesFoggedAtTheirModel;
+    unsigned objectsOffCamera;
 };
 
 TransparentFogStats g_transparentFogStats = {};
@@ -122,6 +146,17 @@ WaterFrameStatus g_waterStatus = {false, "waiting for the world to render"};
 StatusLog g_waterLog;
 unsigned g_drawnWaterClassesTextMask = 0;
 char g_drawnWaterClassesText[kDrawnWaterClassesTextSize] = "";
+
+uintptr_t ExportedGetProcAddress(const char* moduleName)
+{
+    HMODULE module = GetModuleHandleA(moduleName);
+    return module ? reinterpret_cast<uintptr_t>(GetProcAddress(module, "GetProcAddress")) : 0;
+}
+
+const char* DescribeGetProcAddressSlot(GetProcAddressSlotHolds holds)
+{
+    return holds == GetProcAddressSlotHolds::LoaderThunk ? "the loader thunk" : "the resolved GetProcAddress";
+}
 
 FARPROC WINAPI GetProcAddressFilter(HMODULE module, LPCSTR name)
 {
@@ -166,11 +201,20 @@ struct WorldClient
     void (*writeStockFog)(const engine::StockFog& fog);
     void (*endWorld)();
     bool (*glowScreenEffectRuns)();
+    MapPlace (*place)();
 };
 
 void CaptureGameOpaqueState(IDirect3DDevice9* device)
 {
     engine::CaptureOpaqueState(device);
+}
+
+MapPlace GameCameraPlace()
+{
+    float position[3];
+    if (!engine::ReadCameraPosition(position))
+        position[1] = std::numeric_limits<float>::quiet_NaN();
+    return PlaceOf(engine::CurrentMapId(), position);
 }
 
 const WorldClient kGameWorldClient = {&GameFogDevice,
@@ -181,7 +225,8 @@ const WorldClient kGameWorldClient = {&GameFogDevice,
                                       &engine::ReadStockFog,
                                       &engine::WriteStockFog,
                                       &engine::ClearOpaqueState,
-                                      &engine::GlowScreenEffectRuns};
+                                      &engine::GlowScreenEffectRuns,
+                                      &GameCameraPlace};
 
 FrameInputs g_testWorldFrame = {};
 bool g_testGlowScreenEffectRuns = false;
@@ -237,6 +282,11 @@ bool TestGlowScreenEffectRuns()
     return g_testGlowScreenEffectRuns;
 }
 
+MapPlace TestCameraPlace()
+{
+    return CameraPlace(g_testWorldFrame);
+}
+
 const WorldClient kTestOpaqueCaptureClient = {&LatestFogDevice,
                                               &CaptureTestOpaqueState,
                                               &engine::HasOpaqueState,
@@ -245,7 +295,8 @@ const WorldClient kTestOpaqueCaptureClient = {&LatestFogDevice,
                                               &TestReadStockFog,
                                               &TestWriteStockFog,
                                               &engine::ClearOpaqueState,
-                                              &TestGlowScreenEffectRuns};
+                                              &TestGlowScreenEffectRuns,
+                                              &TestCameraPlace};
 const WorldClient kTestFogClient = {&LatestFogDevice,
                                     &CaptureTestOpaqueState,
                                     &TestWorldCaptured,
@@ -254,13 +305,14 @@ const WorldClient kTestFogClient = {&LatestFogDevice,
                                     &TestReadStockFog,
                                     &TestWriteStockFog,
                                     &TestEndWorld,
-                                    &TestGlowScreenEffectRuns};
+                                    &TestGlowScreenEffectRuns,
+                                    &TestCameraPlace};
 const WorldClient* g_worldClient = &kGameWorldClient;
 
 bool FogDrawsInPlaceOfStockFog()
 {
-    return !g_failed && g_renderedLastFrame && GlobalConfig().Get().stockFog == 1 && !g_worldClient->cameraInLiquid() &&
-           g_worldClient->device();
+    return !g_failed && !LuxvelumSwitchedOff() && g_renderedLastFrame && GlobalConfig().Get().stockFog == 1 &&
+           !g_worldClient->cameraInLiquid() && g_worldClient->device();
 }
 
 void PushStockFogOutOfRange()
@@ -286,7 +338,7 @@ void RestorePushedStockFog()
 
 bool TransparentFogStatsCounted()
 {
-    return g_transparentFogHooksInstalled && LogEnabled(LogLevel::Debug);
+    return g_transparentFogHooksInstalled && LogEnabled(LogLevel::Debug) && !LuxvelumSwitchedOff();
 }
 
 void ObserveM2BatchFog()
@@ -351,7 +403,7 @@ void OnFrameBegin()
 
 void OnLiquidSurfaceBegin()
 {
-    if (g_failed || !g_renderedLastFrame || !GlobalConfig().Get().liquidDepth)
+    if (g_failed || LuxvelumSwitchedOff() || !g_renderedLastFrame || !GlobalConfig().Get().liquidDepth)
         return;
     g_liquidDepthWriteDevice = GameFogDevice();
     ForceDepthWrite(g_liquidDepthWriteDevice, true);
@@ -380,18 +432,21 @@ void LogTransparentFogStats(const TransparentFogStats& s)
     const unsigned batches = s.batchesBeforeLiquid + s.batchesAfterLiquid + s.batchesOutsideWorld;
     VF_LOG_DEBUG("transparent fog: %u frames, %u early composites; M2 batch fog %u before the liquid end, %u after, "
                  "%u outside the world render, %u rewritten; colours lighting %.1f%%, black %.1f%%, white %.1f%%, "
-                 "grey %.1f%%, other %.1f%%",
+                 "grey %.1f%%, other %.1f%%; %u unfogged M2 batches, %u fogged by the fit; %u batches fogged at "
+                 "their model, %u models left to the line",
                  s.frames, s.earlyComposites, s.batchesBeforeLiquid, s.batchesAfterLiquid, s.batchesOutsideWorld,
                  s.batchesRewritten,
                  Share(s.lightingColours, batches), Share(s.additiveColours, batches),
                  Share(s.modulateColours, batches), Share(s.modulate2xColours, batches),
-                 Share(s.otherColours, batches));
+                 Share(s.otherColours, batches), s.unfoggedBatches, s.unfoggedBatchesFogged,
+                 s.batchesFoggedAtTheirModel, s.objectsOffCamera);
     VF_LOG_DEBUG("  fog exponent 1: %.1f%%, below 1: %.1f%%, above 1: %.1f%% (lowest %.3f, highest %.3f); glare pass "
-                 "%u drawn before the fog, %u at its own call, %u own calls skipped; 0x%08X holds %s",
+                 "%u drawn before the fog, %u at its own call, %u own calls skipped; 0x%08X holds %s; %u world texts "
+                 "before the glare",
                  Share(s.linearExponents, batches), Share(s.lowerExponents, batches),
                  Share(s.higherExponents, batches), batches ? s.lowestExponent : 0.0f,
                  batches ? s.highestExponent : 0.0f, s.glareDrawnEarly, s.glareCallsPassed, s.glareCallsSkipped,
-                 static_cast<unsigned>(engine::kGlarePassTarget), GlarePassEntryText());
+                 static_cast<unsigned>(engine::kGlarePassTarget), GlarePassEntryText(), s.worldTextBeforeGlare);
 }
 
 void LogTransparentFogStatsWhenDue()
@@ -433,6 +488,24 @@ void ReloadConfigAfterInterval()
         g_lastReload = now;
         GlobalConfig().ReloadIfChanged();
     }
+}
+
+void SwitchOnWhenNothingCouldSwitchItOn()
+{
+    if (!LuxvelumSwitchFlippedOff() || OverlayCanSwitchLuxvelumOn())
+        return;
+    SwitchLuxvelumOn();
+    VF_LOG_INFO("Luxvelum switched on because neither ToggleKey nor the settings window could switch it on again");
+}
+
+void FollowLuxvelumSwitch()
+{
+    SwitchOnWhenNothingCouldSwitchItOn();
+    if (LatchLuxvelumSwitch())
+        VF_LOG_INFO(LuxvelumSwitchedOff() ? "Luxvelum switched off; the client draws its own fog, water and glow"
+                                          : "Luxvelum switched on again");
+    if (LuxvelumSwitchedOff())
+        ReloadConfigAfterInterval();
 }
 
 void UseClientFogRangeInsteadOfPushed(FrameInputs& in)
@@ -566,7 +639,8 @@ struct WorldFogInputs
 WorldFogInputs ReadWorldFogInputs(const Config& cfg)
 {
     WorldFogInputs world = {};
-    world.valid = g_worldClient->frameInputs(world.in, cfg.localLights, LocalLightUpload(cfg));
+    const PointLightUpload upload = LocalLightUpload(cfg, g_worldClient->place());
+    world.valid = g_worldClient->frameInputs(world.in, cfg.localLights, upload);
     if (g_stockFogPushed)
         UseClientFogRangeInsteadOfPushed(world.in);
     UseDeliveredGlow(world.in);
@@ -696,6 +770,8 @@ void OnTransparentsBegin()
     if (g_failed)
         return;
     ReloadConfigAfterInterval();
+    if (LuxvelumSwitchedOff())
+        return;
     const Config& cfg = GlobalConfig().Get();
     const char* blocked = EarlyCompositeBlocked(cfg);
     FogDevice* device = blocked ? nullptr : g_worldClient->device();
@@ -759,14 +835,63 @@ void CountM2BatchFog(const M2BatchFogArgs& args)
     s.highestExponent = batches ? std::max(s.highestExponent, args.exponent) : args.exponent;
 }
 
-void OnM2BatchFog(M2BatchFogArgs& args)
+const ObjectFog* ObjectFogOf(const void* batch)
+{
+    engine::M2ModelPlacement placement;
+    if (!g_objectFogPlacement || !engine::ReadM2BatchModelPlacement(batch, placement))
+        return nullptr;
+    TransparentFogFrame& frame = g_transparentFog;
+    for (int i = 0; i < frame.objectCount; ++i)
+        if (frame.objects[i].model == placement.model)
+            return frame.objects[i].fitted ? &frame.objects[i].fog : nullptr;
+    if (frame.objectCount >= kObjectFogsPerFrame)
+        return nullptr;
+    CachedObjectFog& cached = frame.objects[frame.objectCount++];
+    cached.model = placement.model;
+    cached.fitted = PlacementMatchesCamera(placement.world, placement.cameraDistanceSquared,
+                                           frame.fit.scene.in.camPos) &&
+                    FitObjectFog(frame.fit, placement.world, cached.fog);
+    if (!cached.fitted)
+        ++g_transparentFogStats.objectsOffCamera;
+    return cached.fitted ? &cached.fog : nullptr;
+}
+
+void ApplyFogOfBatch(const void* batch, M2BatchFogArgs& args)
+{
+    if (const ObjectFog* fog = ObjectFogOf(batch))
+    {
+        ApplyObjectFog(*fog, args);
+        ++g_transparentFogStats.batchesFoggedAtTheirModel;
+        return;
+    }
+    ApplyStockFogFit(g_transparentFog.fit, args);
+}
+
+void OnM2BatchFog(const void* batch, M2BatchFogArgs& args)
 {
     if (TransparentFogStatsCounted())
         CountM2BatchFog(args);
     if (!g_transparentFog.armed)
         return;
-    ApplyStockFogFit(g_transparentFog.fit, args);
+    ApplyFogOfBatch(batch, args);
     ++g_transparentFogStats.batchesRewritten;
+}
+
+void OnM2UnfoggedBatch(const void* batch, int& fogOn)
+{
+    if (TransparentFogStatsCounted())
+        ++g_transparentFogStats.unfoggedBatches;
+    if (!g_transparentFog.armed || !g_transparentFog.fit.fogs)
+        return;
+    uint16_t blendMode = 0;
+    uint32_t colour = 0;
+    if (!engine::ReadM2BatchBlendMode(batch, blendMode) || !UnfoggedBatchFogColour(blendMode, colour))
+        return;
+    M2BatchFogArgs args = {0.0f, 0.0f, kLinearStockFogExponent, &colour};
+    ApplyFogOfBatch(batch, args);
+    reinterpret_cast<M2FogSetterFn>(g_m2BatchFogTarget)(args.start, args.end, args.exponent, args.colour);
+    fogOn = 1;
+    ++g_transparentFogStats.unfoggedBatchesFogged;
 }
 
 int TransparentFogGuardFilter(unsigned code, const char* where)
@@ -796,7 +921,8 @@ void DrawFogBeforeWorldText()
     Tick(TText);
     if (!g_transparentFog.inWorld)
         Tick(TTextOut);
-    if (g_failed || !g_transparentFog.inWorld || g_transparentFog.composited || g_transparentFog.drawnBeforeWorldText)
+    if (g_failed || LuxvelumSwitchedOff() || !g_transparentFog.inWorld || g_transparentFog.composited ||
+        g_transparentFog.drawnBeforeWorldText)
         return;
     if (g_stockFogPushed && !g_transparentFog.pastLiquid)
         return;
@@ -804,15 +930,22 @@ void DrawFogBeforeWorldText()
     g_transparentFog.drawnBeforeWorldText = RenderCurrentWorldFog(g_worldClient->device());
 }
 
+void DrawFogAtWorldDone()
+{
+    if (g_failed || LuxvelumSwitchedOff())
+        return;
+    if (g_transparentFog.composited)
+        RenderGodRaysOverTheWorld(g_worldClient->device());
+    else if (!g_transparentFog.drawnBeforeWorldText)
+        RenderCurrentWorldFog(g_worldClient->device());
+}
+
 void OnWorldDone()
 {
     Tick(TWorldDone);
     if (!g_transparentFog.inWorld)
         Tick(TDoneOut);
-    if (!g_failed && g_transparentFog.composited)
-        RenderGodRaysOverTheWorld(g_worldClient->device());
-    else if (!g_failed && !g_transparentFog.drawnBeforeWorldText)
-        RenderCurrentWorldFog(g_worldClient->device());
+    DrawFogAtWorldDone();
     DisarmTransparentFog();
     g_worldClient->endWorld();
 }
@@ -916,7 +1049,7 @@ void OnWaterPassBegin(const void* liquidRenderer)
     g_waterPassDevice = nullptr;
     g_waterClassesThisPass = 0;
     const Config& cfg = GlobalConfig().Get();
-    if (g_waterFailed || !cfg.water)
+    if (g_waterFailed || !cfg.water || LuxvelumSwitchedOff())
         return;
     if (g_failed)
     {
@@ -983,7 +1116,7 @@ void AbortArmedWaterPass()
 
 void ReleaseWaterWhenOff()
 {
-    if (!g_waterResourcesDevice || (!g_waterFailed && GlobalConfig().Get().water))
+    if (!g_waterResourcesDevice || (!g_waterFailed && GlobalConfig().Get().water && !LuxvelumSwitchedOff()))
         return;
     FogDevice* device = g_waterResourcesDevice;
     g_waterResourcesDevice = nullptr;
@@ -993,8 +1126,8 @@ void ReleaseWaterWhenOff()
 
 bool RingsReplaceClientSprites(const Config& cfg)
 {
-    return !g_waterFailed && cfg.water && cfg.waterRipples > 0.0f && !cfg.waterClientSplashes &&
-           g_waterRipplesAvailable && g_waterClient->contactsSupported();
+    return !g_waterFailed && cfg.water && !LuxvelumSwitchedOff() && cfg.waterRipples > 0.0f &&
+           !cfg.waterClientSplashes && g_waterRipplesAvailable && g_waterClient->contactsSupported();
 }
 
 void UpdateClientRippleSprites()
@@ -1165,6 +1298,7 @@ extern "C" void __cdecl vf_on_frame_begin()
 {
     __try
     {
+        FollowLuxvelumSwitch();
         OnFrameBegin();
     }
     __except (GuardFilter(GetExceptionCode(), "frame begin hook"))
@@ -1250,13 +1384,25 @@ extern "C" void __cdecl vf_on_transparents_begin()
     }
 }
 
-extern "C" void __cdecl vf_on_m2_batch_fog(M2BatchFogArgs* args)
+extern "C" void __cdecl vf_on_m2_batch_fog(const void* batch, M2BatchFogArgs* args)
 {
     __try
     {
-        OnM2BatchFog(*args);
+        OnM2BatchFog(batch, *args);
     }
     __except (TransparentFogGuardFilter(GetExceptionCode(), "M2 batch fog hook"))
+    {
+        FailTransparentFog();
+    }
+}
+
+extern "C" void __cdecl vf_on_m2_unfogged_batch(const void* batch, int* fogOn)
+{
+    __try
+    {
+        OnM2UnfoggedBatch(batch, *fogOn);
+    }
+    __except (TransparentFogGuardFilter(GetExceptionCode(), "unfogged M2 batch hook"))
     {
         FailTransparentFog();
     }
@@ -1336,11 +1482,29 @@ __declspec(naked) static void M2BatchFogThunk()
         pushad
         lea eax, [esp + 0x24]
         push eax
+        push dword ptr [esp + 0x8]
         call vf_on_m2_batch_fog
-        add esp, 4
+        add esp, 8
         popad
     forward:
         jmp dword ptr [g_m2BatchFogTarget]
+    }
+}
+
+__declspec(naked) static void M2UnfoggedBatchThunk()
+{
+    __asm {
+        cmp dword ptr [g_m2BatchFogObserved], 0
+        je forward
+        pushad
+        lea eax, [esp + 0x24]
+        push eax
+        push dword ptr [esp + 0x8]
+        call vf_on_m2_unfogged_batch
+        add esp, 8
+        popad
+    forward:
+        jmp dword ptr [g_m2FogUploadTarget]
     }
 }
 
@@ -1358,6 +1522,7 @@ void CallGlarePassUnlessDrawn()
 static void __cdecl GlarePassThunk()
 {
     CallGlarePassUnlessDrawn();
+    g_transparentFog.glareReturned = true;
     __try
     {
         DrawFogBeforeWorldText();
@@ -1372,6 +1537,12 @@ const void* RetargetM2BatchFogThunk(uintptr_t target)
 {
     g_m2BatchFogTarget = target;
     return reinterpret_cast<const void*>(&M2BatchFogThunk);
+}
+
+const void* RetargetM2UnfoggedBatchThunk(uintptr_t target)
+{
+    g_m2FogUploadTarget = target;
+    return reinterpret_cast<const void*>(&M2UnfoggedBatchThunk);
 }
 
 const void* RetargetGlarePassThunk(uintptr_t target)
@@ -1437,11 +1608,21 @@ static void __fastcall WaterMaterialRenderHook(void* material, void*, void* envi
     }
 }
 
+static void DrawFogBeforeWorldTextAfterTheGlare()
+{
+    if (g_transparentFogHooksInstalled && !g_transparentFog.glareReturned)
+    {
+        ++g_transparentFogStats.worldTextBeforeGlare;
+        return;
+    }
+    DrawFogBeforeWorldText();
+}
+
 static void __cdecl WorldTextDrawThunk(void* batch)
 {
     __try
     {
-        DrawFogBeforeWorldText();
+        DrawFogBeforeWorldTextAfterTheGlare();
     }
     __except (GuardFilter(GetExceptionCode(), "world text fog hook"))
     {
@@ -1450,7 +1631,7 @@ static void __cdecl WorldTextDrawThunk(void* batch)
     FogDevice* device = nullptr;
     __try
     {
-        if (!g_failed && GlobalConfig().Get().enable)
+        if (!g_failed && !LuxvelumSwitchedOff() && GlobalConfig().Get().enable)
             device = g_worldClient->device();
         SuppressDepthWrite(device, true);
     }
@@ -1576,13 +1757,26 @@ bool ReplaceSlots(const PointerSlot (&slots)[N])
 }
 }
 
+GetProcAddressSlotHolds ClassifyGetProcAddressSlot(uintptr_t value)
+{
+    if (value == engine::kGetProcAddressThunk)
+        return GetProcAddressSlotHolds::LoaderThunk;
+    const uintptr_t resolved[] = {ExportedGetProcAddress("kernel32.dll"), ExportedGetProcAddress("kernelbase.dll")};
+    for (uintptr_t getProcAddress : resolved)
+        if (getProcAddress && value == getProcAddress)
+            return GetProcAddressSlotHolds::ResolvedGetProcAddress;
+    return GetProcAddressSlotHolds::ForeignCode;
+}
+
 bool InstallEngineHooks()
 {
     auto* slot = reinterpret_cast<GetProcAddressFn*>(engine::kGetProcAddressSlot);
-    uintptr_t current = reinterpret_cast<uintptr_t>(*slot);
-    if (current != engine::kGetProcAddressThunk)
+    const uintptr_t current = reinterpret_cast<uintptr_t>(*slot);
+    const GetProcAddressSlotHolds holds = ClassifyGetProcAddressSlot(current);
+    if (holds == GetProcAddressSlotHolds::ForeignCode)
     {
-        VF_LOG_ERROR("GetProcAddress slot holds 0x%08X (expected the loader thunk 0x%08X); hooks not installed",
+        VF_LOG_ERROR("GetProcAddress slot holds 0x%08X (neither the loader thunk 0x%08X nor the resolved "
+                     "GetProcAddress); hooks not installed",
                      static_cast<unsigned>(current), static_cast<unsigned>(engine::kGetProcAddressThunk));
         return false;
     }
@@ -1596,10 +1790,10 @@ bool InstallEngineHooks()
     if (!SitesHoldTheClientCalls(sites, "world render") || !PatchCallSites(sites))
         return false;
     *slot = &GetProcAddressFilter;
-    VF_LOG_INFO("engine hooks installed: GetProcAddress filter, world render 0x%08X, opaque 0x%08X, liquid 0x%08X, "
-                "world done 0x%08X, world text 0x%08X",
-                static_cast<unsigned>(engine::kWorldRenderSite), static_cast<unsigned>(engine::kOpaqueM2PassSite),
-                static_cast<unsigned>(engine::kLiquidSurfaceSite),
+    VF_LOG_INFO("engine hooks installed: GetProcAddress filter over %s, world render 0x%08X, opaque 0x%08X, liquid "
+                "0x%08X, world done 0x%08X, world text 0x%08X",
+                DescribeGetProcAddressSlot(holds), static_cast<unsigned>(engine::kWorldRenderSite),
+                static_cast<unsigned>(engine::kOpaqueM2PassSite), static_cast<unsigned>(engine::kLiquidSurfaceSite),
                 static_cast<unsigned>(engine::kScreenEffectsSite), static_cast<unsigned>(engine::kWorldTextDrawSite));
     return true;
 }
@@ -1619,6 +1813,21 @@ void EnableForeverLookOnHookedClient()
     EnableForeverLook(&GameFogDevice, glow, grading);
 }
 
+void InstallUnfoggedM2BatchHook()
+{
+    if (!engine::UnfoggedM2BatchLayoutMatches() ||
+        !SiteMatches(engine::kM2UnfoggedBatchSite, engine::kM2FogUploadTarget) ||
+        !PatchCallSite(engine::kM2UnfoggedBatchSite, engine::kM2FogUploadTarget,
+                       reinterpret_cast<const void*>(&M2UnfoggedBatchThunk)))
+    {
+        VF_LOG_ERROR("unfogged M2 batch hook not installed: the client's call at 0x%08X differs from the 12340 "
+                     "client; effects the client draws unfogged stay unfogged after the early fog",
+                     static_cast<unsigned>(engine::kM2UnfoggedBatchSite));
+        return;
+    }
+    VF_LOG_INFO("unfogged M2 batch hook installed at 0x%08X", static_cast<unsigned>(engine::kM2UnfoggedBatchSite));
+}
+
 bool InstallTransparentFogHooks()
 {
     const CallSite sites[] = {
@@ -1634,16 +1843,22 @@ bool InstallTransparentFogHooks()
     if (!SitesHoldTheClientCalls(sites, "transparent fog") || !PatchCallSites(sites))
         return false;
     g_transparentFogHooksInstalled = true;
-    VF_LOG_INFO("transparent fog hooks installed: M2 batch fog 0x%08X, glare pass 0x%08X (TransparentFog=%d)",
+    g_objectFogPlacement = engine::M2ModelPlacementLayoutMatches();
+    VF_LOG_INFO("transparent fog hooks installed: M2 batch fog 0x%08X, glare pass 0x%08X (TransparentFog=%d); "
+                "see-through models fogged %s",
                 static_cast<unsigned>(engine::kM2BatchFogSite), static_cast<unsigned>(engine::kGlarePassSite),
-                GlobalConfig().Get().transparentFog ? 1 : 0);
+                GlobalConfig().Get().transparentFog ? 1 : 0,
+                g_objectFogPlacement ? "at their own position" : "by one line for the screen");
+    InstallUnfoggedM2BatchHook();
     return true;
 }
 
 FogFrameStatus LastFogFrameStatus()
 {
     if (g_failed)
-        return {false, "stopped after an exception, see LuxVelum.log"};
+        return {false, "stopped after an exception, see Luxvelum.log"};
+    if (LuxvelumSwitchedOff())
+        return {false, kSwitchedOff};
     if (g_renderedLastFrame)
         return {true, ""};
     return {false, *g_fogNotDrawnReason ? g_fogNotDrawnReason : "waiting for the world to render"};
@@ -1792,8 +2007,10 @@ WaterFrameStatus LastWaterFrameStatus()
     if (!g_waterHooksInstalled)
         return {false, "hooks not installed"};
     if (g_waterFailed)
-        return {false, "stopped after an exception, see LuxVelum.log"};
+        return {false, "stopped after an exception, see Luxvelum.log"};
     if (!GlobalConfig().Get().water)
         return {false, "off"};
+    if (LuxvelumSwitchedOff())
+        return {false, kSwitchedOff};
     return g_waterStatus;
 }

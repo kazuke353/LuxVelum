@@ -1,0 +1,32 @@
+function(luxvelum_build_id out)
+    if(DEFINED ENV{GITHUB_SHA} AND DEFINED ENV{GITHUB_REF_NAME})
+        string(SUBSTRING "$ENV{GITHUB_SHA}" 0 7 commit)
+        set(${out} "$ENV{GITHUB_REF_NAME} ${commit}" PARENT_SCOPE)
+        return()
+    endif()
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" OUTPUT_VARIABLE commit
+                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --abbrev-ref HEAD
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" OUTPUT_VARIABLE branch
+                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    endif()
+    if(commit)
+        set(${out} "${branch} ${commit} local" PARENT_SCOPE)
+    else()
+        set(${out} "local" PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(luxvelum_version out)
+    set(file "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+    set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${file}")
+    file(STRINGS "${file}" version LIMIT_COUNT 1)
+    string(STRIP "${version}" version)
+    if(NOT version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+        message(FATAL_ERROR "VERSION must hold MAJOR.MINOR.PATCH, not '${version}'")
+    endif()
+    set(${out} "${version}" PARENT_SCOPE)
+endfunction()

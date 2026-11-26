@@ -195,6 +195,13 @@ constexpr size_t kFogFixtureFirstLayerOffset = 4;
 constexpr size_t kFogFixtureLayerCountOffset = 2;
 constexpr size_t kFogFixtureGradingCurveOffset = 12;
 constexpr uint32_t kFogFixtureEarlierFormat = 3;
+constexpr uint32_t kFogFixtureFormatWithoutBandProbes = 4;
+constexpr size_t kFogFixtureBandProbeCountBytes = 4;
+
+size_t FogFixtureHeaderBytes(const FogFixtureHeader& header)
+{
+    return sizeof(header) + (header.version == kFogFixtureFormatWithoutBandProbes ? 0 : kFogFixtureBandProbeCountBytes);
+}
 
 template <typename T>
 void SetFogFixtureValue(std::vector<unsigned char>& bytes, size_t offset, T value)
@@ -251,7 +258,7 @@ void CheckFogDataBounds(const std::wstring& outDir, const std::string& dataPath)
         return;
     FogFixtureHeader header;
     std::memcpy(&header, original.data(), sizeof(header));
-    const size_t paramsOffset = sizeof(header) + header.lightCount * kFogFixtureLightBytes;
+    const size_t paramsOffset = FogFixtureHeaderBytes(header) + header.lightCount * kFogFixtureLightBytes;
     const size_t keysOffset = paramsOffset + header.paramsCount * kFogFixtureParamsBytes;
     if (header.paramsCount == 0 || header.keyCount == 0 || keysOffset + kFogFixtureKeyBytes > original.size())
     {
@@ -287,7 +294,7 @@ void CheckFogDataBounds(const std::wstring& outDir, const std::string& dataPath)
     const size_t logStart = ReadText(g_harnessLog).size();
     CheckRejectedFogFixture(fixture, bytes, "fogdata rejects the earlier format 3");
     const std::string logged = ReadText(g_harnessLog).substr(logStart);
-    Check(logged.find("is format 3, but this build reads format 4; regenerate it") != std::string::npos,
+    Check(logged.find("is format 3, but this build reads formats 4 and 5; regenerate it") != std::string::npos,
           "a rejected fogdata format names both formats and the converter in the log");
     DeleteFileW(fixture.c_str());
 }

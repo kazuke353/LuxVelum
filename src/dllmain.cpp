@@ -1,12 +1,18 @@
+#include "build_id.h"
 #include "client_light_stay.h"
 #include "client_ripple_sprites.h"
 #include "config.h"
 #include "d3d9_wrap.h"
+#include "dxvk_vendor.h"
 #include "engine.h"
 #include "fog_data.h"
+#include "fog_data_choice.h"
 #include "forever_look.h"
+#include "grading_renderer.h"
 #include "hooks.h"
+#include "install_paths.h"
 #include "log.h"
+#include "luxvelum_switch.h"
 #include "noise_volume.h"
 #include "overlay.h"
 #include "renderer.h"
@@ -16,6 +22,7 @@
 
 #include <windows.h>
 
+#include <exception>
 #include <string>
 
 namespace
@@ -56,17 +63,32 @@ std::string ModuleDirectory(HMODULE module)
     return slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
 }
 
+bool PinnedInTheProcess()
+{
+    HMODULE self = nullptr;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                              reinterpret_cast<LPCWSTR>(&PinnedInTheProcess), &self) != FALSE;
+}
+
 void Attach(HMODULE module)
 {
-    std::string dir = ModuleDirectory(module);
-    LogOpen((dir + "LuxVelum.log").c_str());
-    const char* adoptedFrom = AdoptEarlierSettings(dir);
-    GlobalConfig().Load(dir + "LuxVelum.ini");
+    const bool pinned = PinnedInTheProcess();
+    const std::string dir = ModuleDirectory(module);
+    const InstallPaths paths = ClientInstallPaths(dir);
+    LogOpen(paths.log.c_str());
+    const char* adoptedFrom = AdoptEarlierSettings(dir, paths.ini);
+    GlobalConfig().Load(paths.ini);
     const Config& cfg = GlobalConfig().Get();
-    VF_LOG_INFO("LuxVelum loaded from %s", dir.c_str());
+    VF_LOG_INFO("Luxvelum %s (%s) loaded from %s; settings %s, fog data %s, water data %s", kLuxvelumVersion,
+                kLuxvelumBuildId, dir.c_str(), paths.ini.c_str(), paths.fogData.c_str(), paths.waterData.c_str());
+    if (!pinned)
+        VF_LOG_ERROR("Luxvelum.dll could not pin itself in the process; unloading it would leave the hooks calling "
+                     "unmapped code");
     if (adoptedFrom)
-        VF_LOG_INFO("settings taken over from %s into LuxVelum.ini", adoptedFrom);
-    GlobalFogData().Load(dir + "fogdata.bin");
+        VF_LOG_INFO("settings taken over from %s into %s", adoptedFrom, paths.ini.c_str());
+    GlobalFogData().Load(paths.fogData);
+    GlobalFogDataChoice().Prepare(paths.fogData);
+    GlobalZoneHalo().Load(paths.shippedZoneHalo, paths.zoneHalo);
 
     if (!engine::IsSupportedClient())
     {
@@ -83,6 +105,9 @@ void Attach(HMODULE module)
         VF_LOG_INFO("EngineHooks=0; the client runs unmodified");
         return;
     }
+    ReportAmdToDxvkWhenAsked(cfg.dxvkAmdVendor, cfg.multisampling);
+    engine::ChooseCurrentMap();
+    engine::ChooseCameraFocus();
     const bool engineHooks = InstallEngineHooks();
     AllowFogOnNewDevices(engineHooks);
     if (cfg.lightStay)
@@ -94,8 +119,25 @@ void Attach(HMODULE module)
         EnableForeverLookOnHookedClient();
     }
     if (engineHooks && InstallWaterHooks())
-        GlobalWaterData().Load(dir + "waterdata.bin");
+        GlobalWaterData().Load(paths.waterData);
     InstallFarClipHooks();
+}
+
+void AttachWithoutEscapingExceptions(HMODULE module)
+{
+    try
+    {
+        Attach(module);
+    }
+    catch (const std::exception& error)
+    {
+        VF_LOG_ERROR("start-up stopped by an exception (%s); the hooks installed before it stay in place",
+                     error.what());
+    }
+    catch (...)
+    {
+        VF_LOG_ERROR("start-up stopped by an exception; the hooks installed before it stay in place");
+    }
 }
 }
 
@@ -104,7 +146,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(instance);
-        Attach(instance);
+        AttachWithoutEscapingExceptions(instance);
     }
     if (reason == DLL_PROCESS_DETACH)
         GlobalClientRippleSprites().Restore();
@@ -121,6 +163,11 @@ extern "C" IDirect3D9* __cdecl vf_test_wrap_direct3d9(Direct3DCreate9Fn realCrea
     SetRealDirect3DCreate9(realCreate);
     AllowFogOnNewDevices(true);
     return WrappedDirect3DCreate9(sdkVersion);
+}
+
+extern "C" int __cdecl vf_test_get_proc_address_slot_holds(uintptr_t value)
+{
+    return static_cast<int>(ClassifyGetProcAddressSlot(value));
 }
 
 extern "C" void __cdecl vf_test_set_config(const Config* cfg)
@@ -158,6 +205,29 @@ extern "C" void __cdecl vf_test_drawn_fog_shaders(IDirect3DPixelShader9** march,
                                                    IDirect3DPixelShader9** splitComposite)
 {
     DrawnFogShaders(LatestFogDevice(), march, composite, splitComposite);
+}
+
+extern "C" void __cdecl vf_test_flip_luxvelum_switch()
+{
+    FlipLuxvelumSwitch();
+}
+
+extern "C" int __cdecl vf_test_latch_luxvelum_switch()
+{
+    return LatchLuxvelumSwitch() ? 1 : 0;
+}
+
+extern "C" int __cdecl vf_test_luxvelum_switched_off(int* flippedOff)
+{
+    *flippedOff = LuxvelumSwitchFlippedOff() ? 1 : 0;
+    return LuxvelumSwitchedOff() ? 1 : 0;
+}
+
+extern "C" int __cdecl vf_test_fog_status(const char** reason)
+{
+    const FogFrameStatus status = LastFogFrameStatus();
+    *reason = status.reason;
+    return status.drawn ? 1 : 0;
 }
 
 extern "C" int __cdecl vf_test_overlay_visible()
@@ -319,6 +389,26 @@ extern "C" float __cdecl vf_test_drawn_glow_compensation()
     return DrawnFogGlowCompensation(LatestFogDevice());
 }
 
+extern "C" void __cdecl vf_test_fail_fog_pass(int fail)
+{
+    InjectFogPassFault(fail != 0);
+}
+
+extern "C" void __cdecl vf_test_fail_grading_pass(int fail)
+{
+    InjectGradingFault(fail != 0);
+}
+
+extern "C" int __cdecl vf_test_fog_history_valid()
+{
+    return FogHistoryValid(LatestFogDevice()) ? 1 : 0;
+}
+
+extern "C" void __cdecl vf_test_fail_ray_source_copy(int fail)
+{
+    RefuseRaySourceCopy(fail != 0);
+}
+
 extern "C" int __cdecl vf_test_water_armed()
 {
     return WaterPassArmed(LatestFogDevice()) ? 1 : 0;
@@ -365,14 +455,24 @@ extern "C" void __cdecl vf_test_hook_liquid_end()
     vf_on_transparents_begin();
 }
 
+extern "C" int __cdecl vf_test_read_m2_model_placement(const void* batch, engine::M2ModelPlacement* placement)
+{
+    return engine::ReadM2BatchModelPlacement(batch, *placement) ? 1 : 0;
+}
+
 extern "C" void __cdecl vf_test_hook_m2_batch_fog(M2BatchFogArgs* args)
 {
-    vf_on_m2_batch_fog(args);
+    vf_on_m2_batch_fog(nullptr, args);
 }
 
 extern "C" const void* __cdecl vf_test_m2_batch_fog_thunk(uintptr_t target)
 {
     return RetargetM2BatchFogThunk(target);
+}
+
+extern "C" const void* __cdecl vf_test_m2_unfogged_batch_thunk(uintptr_t target)
+{
+    return RetargetM2UnfoggedBatchThunk(target);
 }
 
 extern "C" const void* __cdecl vf_test_glare_pass_thunk(uintptr_t target)
@@ -446,6 +546,26 @@ extern "C" void __cdecl vf_test_probe_depth_copy(IDirect3D9* d3d, DepthCopyProbe
     *probe = ProbeDepthCopy(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL);
 }
 
+extern "C" D3DFORMAT __cdecl vf_test_display_format_for(D3DFORMAT backBufferFormat)
+{
+    return DisplayFormatFor(backBufferFormat);
+}
+
+extern "C" void __cdecl vf_test_fail_depth_creation(int failing)
+{
+    FailDepthCreation(failing != 0);
+}
+
+extern "C" const char* __cdecl vf_test_load_nvapi(LibraryLoader load)
+{
+    return LoadNvapiThrough(load);
+}
+
+extern "C" const char* __cdecl vf_test_log_path()
+{
+    return LogPath();
+}
+
 extern "C" void __cdecl vf_test_water_ripple_stats(WaterRippleStats* out)
 {
     ReadWaterRippleStats(LatestFogDevice(), *out);
@@ -495,6 +615,11 @@ extern "C" void __cdecl vf_test_forever_look_world_done()
 extern "C" int __cdecl vf_test_delivered_glow(float* amount)
 {
     return DeliveredGlowThisFrame(*amount) ? 1 : 0;
+}
+
+extern "C" void __cdecl vf_test_fail_grading_scene_copies(int count)
+{
+    FailGradingSceneCopies(count);
 }
 
 extern "C" void __cdecl vf_test_grading_stats(GradingStats* stats)

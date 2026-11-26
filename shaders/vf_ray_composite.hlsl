@@ -2,7 +2,9 @@
 
 float4 main(float2 pixelIndex : VPOS) : COLOR0
 {
-    float2 viewportUv = (pixelIndex + 0.5 - ViewportOrigin()) / ViewportSize();
+    float2 pixel = pixelIndex + 0.5;
+    float2 viewportUv = (pixel - ViewportOrigin()) / ViewportSize();
     float3 scene = tex2Dlod(sSceneBeforeFog, float4(viewportUv, 0, 0)).rgb;
-    return float4(BlendGodRays(scene, DisplaySpaceGodRays(viewportUv)), 1);
+    float depth = SampleDepth(sDepth, pixel);
+    return float4(DitheredForDisplay(BlendGodRays(scene, DisplaySpaceGodRays(viewportUv, pixel, depth)), pixel), 1);
 }

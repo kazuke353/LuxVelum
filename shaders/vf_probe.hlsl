@@ -9,6 +9,7 @@ static const float kGridCellCentreFraction = 0.1;
 static const float kClassWorld = 0;
 static const float kClassBeyondFarClip = 1;
 static const float kClassSky = 2;
+static const float kFogRadianceRow = 1;
 
 float2 GridPoint(float probeIndex)
 {
@@ -27,5 +28,7 @@ float4 main(float2 probeTexel : VPOS) : COLOR0
     float2 pixel = floor(cellCentre) + 0.5;
     float depth = SampleDepth(sDepth, pixel);
     float4 fog = tex2Dlod(sFog, float4(LowResTexelToUv(FullPixelToLowResTexel(pixel)), 0, 0));
+    if (probeTexel.y >= kFogRadianceRow)
+        return fog;
     return float4(depth, LinearDepth(depth), fog.a, DepthClass(depth));
 }

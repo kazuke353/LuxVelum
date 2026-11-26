@@ -135,12 +135,19 @@ FrameInputs HyjalMidnight()
     return ContinentFrame(kKalimdor, hyjal, 0.0f, kToMoonOverHyjal, true);
 }
 
+Config WithClassicNoise()
+{
+    Config config;
+    config.classicNoise = true;
+    return config;
+}
+
 void CheckModelTakesAuthoredNoise(const FogData& data)
 {
     const FrameInputs hyjal = HyjalMidnight();
     AuthoredFog fog = {};
     const bool resolved = data.Resolve(kKalimdor, hyjal.camPos, hyjal.dayFraction, kClearWeather, fog);
-    Config on;
+    const Config on = WithClassicNoise();
     Config off;
     off.classicNoise = false;
     const FogParams noisy = BuildFogParams(hyjal, on, &fog);
@@ -257,7 +264,7 @@ double HyjalStormBlendPath(const FogData& data, double clearSeconds, float* tile
 {
     const FrameInputs hyjal = HyjalMidnight();
     const double pointNearCamera[3] = {hyjal.camPos[0] + 212.0, hyjal.camPos[1] + 212.0, hyjal.camPos[2]};
-    const Config config;
+    const Config config = WithClassicNoise();
     AuthoredNoiseScroll scroll;
     double coordinates[kAuthoredNoiseOctaves][3] = {};
     double path[kAuthoredNoiseOctaves][3] = {};
@@ -815,6 +822,26 @@ void CheckNoisyCompositeThinsSilhouettes(IDirect3DDevice9* device)
           "every noisy composite marches thin silhouettes at full resolution through the authored noise");
 }
 
+void CheckLitNoisyCompositeThinsSilhouettes(IDirect3DDevice9* device)
+{
+    const BYTE* const* composites[2] = {silhouette_quality::kLitNoisyComposites, silhouette_quality::kLitComposites};
+    bool drawn[2] = {};
+    float worst[2] = {};
+    for (int family = 0; family < 2; ++family)
+    {
+        silhouette_quality::Fixture fixture(device);
+        drawn[family] = PrepareThinningFixture(device, fixture, composites[family]) &&
+                        silhouette_quality::WorstStripError(fixture, worst[family]);
+    }
+    std::printf("     lit composite at thin silhouettes with noise %.2f: the lit noisy composite's largest "
+                "transmittance error %.2f/255; the lit composite that marches without the noise misses by %.2f/255\n",
+                kThinningNoise / 255.0f, worst[0] * 255.0f, worst[1] * 255.0f);
+    Check(drawn[1] && worst[1] > kMinNoiseFreeSideMiss,
+          "a lit composite that marches thin silhouettes without the authored noise misses the noisy fog around them");
+    Check(drawn[0] && worst[0] <= kMarchTolerance,
+          "every lit noisy composite marches thin silhouettes at full resolution through the authored noise");
+}
+
 struct SplitSideErrors
 {
     bool drawn = false;
@@ -866,6 +893,18 @@ void CheckNoisySplitCompositeMarchesSides(IDirect3DDevice9* device)
           "marched at full resolution, not taken from the low-resolution fog");
     Check(noisy.drawn && noisy.worst <= kMarchTolerance,
           "every noisy split composite marches a sample side at that side's depth through the authored noise "
+          "where no low-resolution tap matches it");
+}
+
+void CheckLitNoisySplitCompositeMarchesSides(IDirect3DDevice9* device)
+{
+    const SplitSideErrors litNoisy =
+        MeasureSplitSidesBesideStrips(device, silhouette_quality::kLitNoisySplitComposites);
+    std::printf("     lit noisy split composite side beside thin silhouettes, noise %.2f: largest transmittance error "
+                "%.2f/255\n",
+                kThinningNoise / 255.0f, litNoisy.worst * 255.0f);
+    Check(litNoisy.drawn && litNoisy.worst <= kMarchTolerance,
+          "every lit noisy split composite marches a sample side at that side's depth through the authored noise "
           "where no low-resolution tap matches it");
 }
 
@@ -949,6 +988,76 @@ void CheckRendererDrawsStormNoise(Harness& harness)
     vf_test_set_config(&saved);
 }
 
+void CheckRendererDrawsLitStormNoise(Harness& harness)
+{
+    Config saved;
+    vf_test_get_config(&saved);
+    Config config = saved;
+    config.quality = 2;
+    config.noiseAmount = 0.0f;
+    config.temporal = 0.0f;
+    config.godRays = 0.0f;
+    config.dataMode = 1;
+    config.localLights = true;
+    config.classicNoise = true;
+    vf_test_set_config(&config);
+    const D3DVIEWPORT9 world = {0, 0, 128, 96, 0, 1};
+    const Vec3 at = Add(kHarbourEye, {100, 100, -5});
+    float view[16];
+    float projection[16];
+    CameraRelativeLookAt(kHarbourEye, at, view);
+    EngineProjection(128.0f / 96.0f, projection);
+    FrameInputs input = MakeInputs(view, projection, kHarbourEye, at, world);
+    input.mapId = kEasternKingdoms;
+    input.dayFraction = kNoon;
+    input.lightParams = Storm(kFullStorm);
+    LocalPointLight light;
+    light.position[0] = kHarbourEye.x + 20;
+    light.position[1] = kHarbourEye.y + 20;
+    light.position[2] = kHarbourEye.z;
+    light.color[0] = 0.2f;
+    light.color[1] = 0.1f;
+    light.color[2] = 0.05f;
+    light.attenuation[0] = 1;
+    light.attenuation[2] = 0.005f;
+    engine::SelectLocalPointLight(input.localLights, light, input.camPos, LocalLightUpload(config, CameraPlace(input)));
+    harness.BeginFrame();
+    harness.DrawScene(kHarbourEye, view, projection, world);
+    const char* skip = "";
+    const bool rendered = vf_test_render(&input, &skip) != 0;
+    DrawnShaders drawn;
+    vf_test_drawn_fog_shaders(&drawn.march, &drawn.composite, &drawn.splitComposite);
+    harness.dev->EndScene();
+    harness.dev->Present(nullptr, nullptr, nullptr, nullptr);
+    Check(rendered && input.localLights.pointLightCount == 1 && ShaderRuns(drawn.march, g_ps_lit_noisy_march_mid) &&
+              ShaderRuns(drawn.composite, g_ps_lit_noisy_composite_mid),
+          "a storm with authored noise and a point light draws the lit noisy march and the lit noisy composite, "
+          "whose silhouettes sample the noise like the march around them");
+    vf_test_set_config(&saved);
+}
+
+void CheckShippedIniTurnsClassicNoiseOn(const std::wstring& shippedIni)
+{
+    ConfigStore shipped;
+    shipped.Load(NarrowPath(shippedIni));
+    const std::string text = ReadText(shippedIni);
+    int offLines = 0;
+    int onLines = 0;
+    for (size_t start = 0; start < text.size();)
+    {
+        const size_t end = std::min(text.find('\n', start), text.size());
+        std::string line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        offLines += line == "ClassicNoise=0";
+        onLines += line == "ClassicNoise=1";
+        start = end + 1;
+    }
+    Check(shipped.Get().classicNoise && !Config().classicNoise && onLines == 1 && offLines == 0,
+          "the shipped INI turns ClassicNoise on, the built-in default keeps it off, so an INI without the key keeps "
+          "storms at their full Classic density");
+}
+
 void CheckAuthoredNoise(const FogData& data)
 {
     CheckCurveMatchesForever();
@@ -964,6 +1073,8 @@ void CheckAuthoredNoiseOnTheGpu(IDirect3DDevice9* device)
     CheckMarchAppliesNoise(device);
     CheckMarchSamplesNoiseAlongTheWorldRay(device);
     CheckNoisyCompositeThinsSilhouettes(device);
+    CheckLitNoisyCompositeThinsSilhouettes(device);
     CheckNoisySplitCompositeMarchesSides(device);
+    CheckLitNoisySplitCompositeMarchesSides(device);
 }
 }

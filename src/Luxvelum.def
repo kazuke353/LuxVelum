@@ -1,7 +1,8 @@
-LIBRARY LuxVelum
+LIBRARY Luxvelum
 EXPORTS
     vf_loader_anchor
     vf_test_wrap_direct3d9
+    vf_test_get_proc_address_slot_holds
     vf_test_set_config
     vf_test_get_config
     vf_test_render
@@ -10,6 +11,10 @@ EXPORTS
     vf_test_force_depth_write
     vf_test_suppress_depth_write
     vf_test_overlay_visible
+    vf_test_flip_luxvelum_switch
+    vf_test_latch_luxvelum_switch
+    vf_test_luxvelum_switched_off
+    vf_test_fog_status
     vf_test_draw_overlay
     vf_test_settings_window
     vf_test_assign_water_data
@@ -44,7 +49,9 @@ EXPORTS
     vf_test_hook_liquid_end
     vf_test_hook_world_done
     vf_test_hook_m2_batch_fog
+    vf_test_read_m2_model_placement
     vf_test_m2_batch_fog_thunk
+    vf_test_m2_unfogged_batch_thunk
     vf_test_glare_pass_thunk
     vf_test_world_text_draw_thunk
     vf_test_log_transparent_fog_stats
@@ -59,6 +66,10 @@ EXPORTS
     vf_test_read_scene_depth
     vf_test_multisampling
     vf_test_probe_depth_copy
+    vf_test_display_format_for
+    vf_test_fail_depth_creation
+    vf_test_load_nvapi
+    vf_test_log_path
     vf_test_water_ripple_stats
     vf_test_water_ripple_shading
     vf_test_water_contact_reads
@@ -70,9 +81,14 @@ EXPORTS
     vf_test_forever_look_world_done
     vf_test_delivered_glow
     vf_test_grading_stats
+    vf_test_fail_grading_scene_copies
     vf_test_forever_look_guards
     vf_test_forever_look_status
     vf_test_use_world_hook_client
     vf_test_hook_opaque_done
     vf_test_simulate_fog_hook_failure
     vf_test_drawn_glow_compensation
+    vf_test_fail_fog_pass
+    vf_test_fail_grading_pass
+    vf_test_fog_history_valid
+    vf_test_fail_ray_source_copy

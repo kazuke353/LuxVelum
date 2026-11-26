@@ -66,21 +66,48 @@ struct FogParams
     float rayColor[3];
     float lightVisibility;
     float lightAboveHorizon;
+    float haloShadow = 0.0f;
+    float haloOccluderDistance = 0.0f;
     float directLightMatch;
     float maxDistance;
     float horizonStart;
     float farClip;
     float referenceZ;
     float farLimit;
+    float localLightGain = 1.0f;
     bool linear;
     bool authored;
 };
 
 void UnpackColor(uint32_t argb, float* rgb);
 FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const AuthoredFog* authored);
-PointLightUpload LocalLightUpload(const Config& cfg);
+
+enum class MapRegion
+{
+    Azeroth,
+    Outland,
+    Northrend,
+    TBCStart,
+};
+
+struct MapPlace
+{
+    int mapId;
+    float y;
+};
+
+MapPlace PlaceOf(int mapId, const float* position);
+MapPlace CameraPlace(const FrameInputs& in);
+MapRegion RegionOf(const MapPlace& place);
+const char* RegionName(MapRegion region);
+bool UsesFogData(const Config& cfg, const MapPlace& place);
+Config ConfigForPlace(const Config& cfg, const MapPlace& place);
+Config ConfigForFrame(const Config& cfg, const FrameInputs& in);
+PointLightUpload LocalLightUpload(const Config& cfg, const MapPlace& place);
 bool AnyLayerNoise(const FogParams& fog);
 float EnergyNormalisedPhaseScale(float g);
+float HaloEdgePhase(float g);
+float PhaseUnderHaloShadow(float forwardPhase, float g, float haloShadow);
 
 float NoiseDensityCurve(float x);
 float MeanNoiseDensity(const LayerNoise& noise);

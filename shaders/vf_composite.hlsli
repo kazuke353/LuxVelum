@@ -1,11 +1,17 @@
 #if SAMPLES_AUTHORED_NOISE
 #define SUN_SHADOW 0
 #endif
+#if LOCAL_LIGHTS
+#define SUN_SHADOW_RAMP 0
+#endif
 #include "vf_integrate.hlsli"
 
 float4 cComposite : register(c96);
 float4 cGodRayColour : register(c97);
 float4 cSun : register(c98);
+float4 cCharacterBox : register(c100);
+float4 cCharacterFocus : register(c101);
+float4 cCharacterHeights : register(c102);
 
 sampler2D sFog : register(s1);
 sampler2D sGodRays : register(s2);
@@ -18,11 +24,15 @@ static const float4 kSunMarkerColour = float4(1, 0, 0, 1);
 static const float kDebugRadiance = 1;
 static const float kDebugTransmittance = 2;
 static const float kDebugLinearDepth = 3;
+static const float4 kFullResolutionMarchColour = float4(1, 0, 1, 1);
+static bool gMarchedAtFullResolution = false;
 static const float kSameSurfaceAbsoluteDepth = 0.5;
 static const float kSameSurfaceRelativeDepth = 0.02;
 static const float kTapPlaneRelativeDepth = 0.005;
 static const float kWholeBilinearWeight = 0.999;
 static const float kMaxDisplayedMarchCurvature = 2.0 / 255;
+static const int kSurroundingTaps = 16;
+static const float kNearestTapRelativeDepth = 0.25;
 
 float Exposure()
 {
@@ -202,14 +212,14 @@ bool TapsReproduceMarch(BilinearTaps taps, float viewZ)
     return MarchLinearBetweenTaps(taps);
 }
 
-bool FullResolutionMarchTakesNoiseAtItsMean()
+bool LitCompositeUnderNoise()
 {
-    return kMarchesLocalLights && !kSamplesAuthoredNoise && AnyLayerNoise();
+    return kMarchesLocalLights && AnyLayerNoise();
 }
 
 bool LightOnRayNeedsFullResolution(float2 pixel, float viewZ)
 {
-    [branch] if (!kMarchesLocalLights || FullResolutionMarchTakesNoiseAtItsMean())
+    [branch] if (!kMarchesLocalLights || LitCompositeUnderNoise())
         return false;
     return RayMeetsLocalLight(pixel, viewZ);
 }
@@ -227,12 +237,59 @@ float4 FilteredFogBetweenTaps(BilinearTaps taps)
     return fog;
 }
 
+bool SameSurfaceTap(float depth, float viewZ, float tapDepth, float tapViewZ)
+{
+    return SameDepthClass(depth, tapDepth) &&
+           abs(tapViewZ - viewZ) <= max(kSameSurfaceAbsoluteDepth, viewZ * kSameSurfaceRelativeDepth);
+}
+
+bool InnerBilinearTap(float2 offset)
+{
+    return all(offset >= 1) && all(offset <= 2);
+}
+
+float4 SameSurfaceFogAroundFootprint(float2 pixel, float depth, float viewZ)
+{
+    float2 lowResCoord = FullPixelToLowResTexel(pixel);
+    float2 firstTexel = floor(lowResCoord) - 1;
+    float4 weightedFog = 0;
+    float weightSum = 0;
+    float2 nearestDepthTexel = 0;
+    float nearestRelativeDepth = kNearestTapRelativeDepth;
+    [loop] for (int j = 0; j < kSurroundingTaps; j++)
+    {
+        float2 offset = float2(frac(j * 0.25) * 4, floor(j * 0.25));
+        float2 tapTexel = clamp(firstTexel + offset, 0, LowResSize() - 1);
+        float tapDepth = SampleDepth(sDepth, LowResTexelToFullPixel(tapTexel));
+        float tapViewZ = LinearDepth(tapDepth);
+        float2 toTap = tapTexel - lowResCoord;
+        float relativeDepth = abs(tapViewZ - viewZ) / max(viewZ, 1e-3);
+        bool sameClass = SameDepthClass(depth, tapDepth);
+        float weight = !InnerBilinearTap(offset) && SameSurfaceTap(depth, viewZ, tapDepth, tapViewZ)
+            ? 1 / ((1e-3 + relativeDepth) * (1 + dot(toTap, toTap)))
+            : 0;
+        [branch] if (weight > 0)
+            weightedFog += tex2Dlod(sFog, float4(LowResTexelToUv(tapTexel), 0, 0)) * weight;
+        weightSum += weight;
+        [flatten] if (sameClass && relativeDepth < nearestRelativeDepth)
+        {
+            nearestRelativeDepth = relativeDepth;
+            nearestDepthTexel = tapTexel;
+        }
+    }
+    [branch] if (weightSum > 1e-6)
+        return weightedFog / weightSum;
+    [branch] if (nearestRelativeDepth < kNearestTapRelativeDepth)
+        return tex2Dlod(sFog, float4(LowResTexelToUv(nearestDepthTexel), 0, 0));
+    return -1;
+}
+
 float4 FogWithoutMatchingTap(float2 pixel, float depth, float viewZ)
 {
     [branch] if (!LightOnRayNeedsFullResolution(pixel, viewZ))
     {
         BilinearTaps taps = GatherBilinearTaps(pixel, depth, viewZ);
-        [branch] if (FullResolutionMarchTakesNoiseAtItsMean())
+        [branch] if (LitCompositeUnderNoise())
         {
             [branch] if (PixelOnTapPlane(taps, viewZ))
                 return FilteredFogBetweenTaps(taps);
@@ -243,6 +300,10 @@ float4 FogWithoutMatchingTap(float2 pixel, float depth, float viewZ)
                 return taps.currentMarch;
         }
     }
+    float4 surroundingFog = kMarchesLocalLights ? SameSurfaceFogAroundFootprint(pixel, depth, viewZ) : -1;
+    [branch] if (surroundingFog.a >= 0)
+        return surroundingFog;
+    gMarchedAtFullResolution = true;
     return IntegrateFogAtDepth(pixel, depth, 0.5);
 }
 
@@ -261,10 +322,8 @@ float4 DepthAwareUpsample(float2 pixel, float depth, float viewZ)
         float tapDepth = SampleDepth(sDepth, LowResTexelToFullPixel(tapTexel));
         float tapViewZ = LinearDepth(tapDepth);
         float2 bilinearWeight = lerp(1 - bilinearFraction, bilinearFraction, tapOffset);
-        bool sameClass = SameDepthClass(depth, tapDepth);
-        bool sameDepth = abs(tapViewZ - viewZ) <= max(kSameSurfaceAbsoluteDepth, viewZ * kSameSurfaceRelativeDepth);
         float relativeDepthDifference = abs(tapViewZ - viewZ) / max(viewZ, 1e-3);
-        float weight = sameClass && sameDepth ?
+        float weight = SameSurfaceTap(depth, viewZ, tapDepth, tapViewZ) ?
             bilinearWeight.x * bilinearWeight.y / (1e-3 + relativeDepthDifference) : 0;
         weightedFog += tex2Dlod(sFog, float4(LowResTexelToUv(tapTexel), 0, 0)) * weight;
         weightSum += weight;
@@ -274,11 +333,14 @@ float4 DepthAwareUpsample(float2 pixel, float depth, float viewZ)
     return FogWithoutMatchingTap(pixel, depth, viewZ);
 }
 
-float3 DisplaySpaceGodRays(float2 viewportUv)
+float3 DisplaySpaceGodRays(float2 viewportUv, float2 pixel, float depth)
 {
     float3 godRays = 0;
     [branch] if (GodRayStrength() > 0)
-        godRays = tex2Dlod(sGodRays, float4(viewportUv, 0, 0)).rgb * cGodRayColour.rgb * GodRayStrength();
+    {
+        [branch] if (!OnTheOwnCharacter(pixel, depth, cCharacterBox, cCharacterFocus, cCharacterHeights))
+            godRays = tex2Dlod(sGodRays, float4(viewportUv, 0, 0)).rgb * cGodRayColour.rgb * GodRayStrength();
+    }
     return godRays;
 }
 
@@ -309,19 +371,19 @@ float3 FogSceneColour(float3 scene, float4 fog)
     return colour;
 }
 
-float4 BlendOverSceneCopy(float2 viewportUv, float4 fog, float3 godRays)
+float4 BlendOverSceneCopy(float2 pixel, float2 viewportUv, float4 fog, float3 godRays)
 {
     float3 scene = tex2Dlod(sSceneBeforeFog, float4(viewportUv, 0, 0)).rgb;
-    return float4(BlendGodRays(FogSceneColour(scene, fog), godRays), 1);
+    return float4(DitheredForDisplay(BlendGodRays(FogSceneColour(scene, fog), godRays), pixel), 1);
 }
 
-float4 PremultipliedForFixedFunctionBlend(float4 fog, float3 godRays, bool linearLight)
+float4 PremultipliedForFixedFunctionBlend(float2 pixel, float4 fog, float3 godRays, bool linearLight)
 {
     float opacity = max(fog.a, 1e-4);
     float3 unpremultiplied = RollOffHighlights(fog.rgb / opacity, kHighlightKnee);
     if (linearLight)
         unpremultiplied = LinearToGamma(unpremultiplied);
-    return float4(unpremultiplied * fog.a + godRays, fog.a);
+    return float4(DitheredForDisplay(unpremultiplied * fog.a + godRays, pixel), fog.a);
 }
 
 float4 CompositeAtDepth(float2 pixel, float depth)
@@ -331,7 +393,7 @@ float4 CompositeAtDepth(float2 pixel, float depth)
     fog.rgb *= Exposure();
 
     float2 viewportUv = (pixel - ViewportOrigin()) / ViewportSize();
-    float3 godRays = DisplaySpaceGodRays(viewportUv);
+    float3 godRays = DisplaySpaceGodRays(viewportUv, pixel, depth);
     const bool linearLight = BlendsInLinearLight();
 
     [branch] if (DebugViewEnabled())
@@ -342,14 +404,12 @@ float4 CompositeAtDepth(float2 pixel, float depth)
             return float4(1 - fog.aaa, 1);
         if (DebugViewAtMost(kDebugLinearDepth))
             return float4(saturate(viewZ / MaxFogDistance()).xxx, 1);
-#if !LOCAL_LIGHTS
-        return float4(SampledSunVisibility(pixel).xxx, 1);
-#endif
+        return gMarchedAtFullResolution ? kFullResolutionMarchColour : float4(1 - fog.aaa, 1);
     }
     [branch] if (SunMarkerEnabled() && distance(pixel, SunPixel()) < kSunMarkerRadius)
         return kSunMarkerColour;
 
     [branch] if (BlendsOverSceneCopy())
-        return BlendOverSceneCopy(viewportUv, fog, godRays);
-    return PremultipliedForFixedFunctionBlend(fog, godRays, linearLight);
+        return BlendOverSceneCopy(pixel, viewportUv, fog, godRays);
+    return PremultipliedForFixedFunctionBlend(pixel, fog, godRays, linearLight);
 }

@@ -11,6 +11,7 @@
 #include <climits>
 #include <cmath>
 #include <cwchar>
+#include <string>
 
 namespace
 {
@@ -90,15 +91,31 @@ Function NvapiFunction(NvapiQueryInterface query, unsigned id)
     return reinterpret_cast<Function>(query(id));
 }
 
-NvapiD3D9 LoadNvapiD3D9()
+std::wstring SystemLibraryPath(const wchar_t* file)
+{
+    wchar_t folder[MAX_PATH] = {};
+    const UINT length = GetSystemDirectoryW(folder, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return std::wstring();
+    return std::wstring(folder, length) + L"\\" + file;
+}
+
+NvapiD3D9 LoadNvapiD3D9(LibraryLoader load)
 {
     NvapiD3D9 nvapi;
-    HMODULE library = LoadLibraryExW(L"nvapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    const auto query =
-        library ? reinterpret_cast<NvapiQueryInterface>(GetProcAddress(library, "nvapi_QueryInterface")) : nullptr;
+    const std::wstring path = SystemLibraryPath(L"nvapi.dll");
+    HMODULE library = path.empty() ? nullptr : load(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!library)
+    {
+        const DWORD error = GetLastError();
+        nvapi.unavailable = "nvapi.dll could not be loaded from the system folder";
+        VF_LOG_INFO("NVAPI unavailable: %s (Windows error %lu)", nvapi.unavailable, error);
+        return nvapi;
+    }
+    const auto query = reinterpret_cast<NvapiQueryInterface>(GetProcAddress(library, "nvapi_QueryInterface"));
     if (!query)
     {
-        nvapi.unavailable = "nvapi.dll is missing from the system folder";
+        nvapi.unavailable = "nvapi.dll has no nvapi_QueryInterface";
         VF_LOG_INFO("NVAPI unavailable: %s", nvapi.unavailable);
         return nvapi;
     }
@@ -122,7 +139,7 @@ NvapiD3D9 LoadNvapiD3D9()
 
 const NvapiD3D9& Nvapi()
 {
-    static const NvapiD3D9 nvapi = LoadNvapiD3D9();
+    static const NvapiD3D9 nvapi = LoadNvapiD3D9(LoadLibraryExW);
     return nvapi;
 }
 
@@ -525,7 +542,7 @@ DepthCopyProbe ProbeDriver(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type)
         return {DepthCopyMethod::None, "the driver has no RESZ depth resolve and the adapter is not NVIDIA"};
     if (!LoadedFromSystemFolder(FirstMethodOf(d3d)))
         return {DepthCopyMethod::None, "d3d9.dll is not the system copy (DXVK or another wrapper), so NVAPI cannot "
-                                       "copy its depth"};
+                                       "copy its depth; behind DXVK, DxvkAmdVendor=1 lets it offer RESZ"};
     const NvapiD3D9& nvapi = Nvapi();
     if (nvapi.unavailable[0])
         return {DepthCopyMethod::None, nvapi.unavailable};
@@ -549,6 +566,11 @@ const char* DepthCopyMethodName(DepthCopyMethod method)
 void ForceDepthCopyMethod(int method)
 {
     g_forcedMethod = method;
+}
+
+const char* LoadNvapiThrough(LibraryLoader load)
+{
+    return LoadNvapiD3D9(load).unavailable;
 }
 
 bool SameSampleCount(const D3DSURFACE_DESC& target, const D3DSURFACE_DESC& depth)

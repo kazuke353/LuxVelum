@@ -1,14 +1,12 @@
 #pragma once
 
-#include "ps_lit_split_composite_mid.h"
+#include "silhouette_quality_checks.h"
 
 namespace multisampling_checks
 {
 using Direct3DCreate = IDirect3D9*(WINAPI*)(UINT);
 
 constexpr D3DMULTISAMPLE_TYPE kFourSamples = D3DMULTISAMPLE_4_SAMPLES;
-constexpr DWORD kClientDeviceFlags =
-    D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
 constexpr DWORD kClientClearFlags = D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER;
 constexpr D3DFORMAT kStencilDepthFormat = D3DFMT_D24S8;
 constexpr D3DFORMAT kResz = static_cast<D3DFORMAT>(MAKEFOURCC('R', 'E', 'S', 'Z'));
@@ -67,6 +65,9 @@ constexpr D3DFORMAT kListDepthFormats[] = {D3DFMT_D16, D3DFMT_D24X8, D3DFMT_D24S
 constexpr int kListSampleCounts[] = {0, 2, 4, 6, 8, 10, 12, 14, 16};
 constexpr double kMaxListCostFactor = 3.0;
 constexpr double kListCostAllowanceMs = 10.0;
+constexpr DWORD kSearchFlagsAddedByKb2533623 = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                                              LOAD_LIBRARY_SEARCH_USER_DIRS | LOAD_LIBRARY_SEARCH_SYSTEM32 |
+                                              LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
 
 struct Targets
 {
@@ -331,6 +332,41 @@ bool FogFrameDrawn(const FogFrame& f)
     return f.rendered && CopiedDepthMatches(f) && f.lumaChange > kMinFogLumaChange;
 }
 
+struct LibraryLoad
+{
+    std::wstring file;
+    DWORD flags = 0;
+};
+
+LibraryLoad g_windows7Load;
+
+HMODULE WINAPI LoadOnWindows7WithoutKb2533623(LPCWSTR file, HANDLE, DWORD flags)
+{
+    g_windows7Load = {file, flags};
+    SetLastError((flags & kSearchFlagsAddedByKb2533623) ? ERROR_INVALID_PARAMETER : ERROR_MOD_NOT_FOUND);
+    return nullptr;
+}
+
+std::wstring SystemFolderNvapi()
+{
+    wchar_t folder[MAX_PATH] = {};
+    const UINT length = GetSystemDirectoryW(folder, MAX_PATH);
+    return std::wstring(folder, length) + L"\\nvapi.dll";
+}
+
+void CheckNvapiLoadsWithoutKb2533623()
+{
+    const size_t logStart = water_settings_checks::DllLogSize();
+    const char* unavailable = vf_test_load_nvapi(LoadOnWindows7WithoutKb2533623);
+    const std::string log = runtime_cost::LogWrittenSince(logStart);
+    Check(g_windows7Load.file == SystemFolderNvapi() && (g_windows7Load.flags & kSearchFlagsAddedByKb2533623) == 0 &&
+              std::strcmp(unavailable, "nvapi.dll could not be loaded from the system folder") == 0 &&
+              runtime_cost::HasLine(log, "NVAPI unavailable: nvapi.dll could not be loaded from the system folder "
+                                         "(Windows error 126)"),
+          "NVAPI is loaded by its full path in the system folder, without the search flags that Windows 7 refuses "
+          "without KB2533623, and a failed load is logged with its Windows error instead of as a missing file");
+}
+
 void CheckVideoOptionsOffer(Harness& m, IDirect3D9* real, bool driverCopies)
 {
     DWORD wrappedLevels = 0;
@@ -439,7 +475,7 @@ void CheckFallbacks(Harness& m, IDirect3D9* real)
 {
     Config off = MultisamplingConfig(false);
     vf_test_set_config(&off);
-    CheckSingleSampledFallback(m, "Multisampling=0 with 4x requested", "Multisampling=0 in LuxVelum.ini");
+    CheckSingleSampledFallback(m, "Multisampling=0 with 4x requested", "Multisampling=0 in Luxvelum.ini");
 
     Config keep = MultisamplingConfig(true);
     vf_test_set_config(&keep);
@@ -1062,7 +1098,8 @@ FrameInputs HarbourStormInputs(const WorldCamera& camera, bool lamp, const Confi
     in.dayFraction = kNoon;
     in.lightParams = Storm(authored_noise::kFullStorm);
     if (lamp)
-        engine::SelectLocalPointLight(in.localLights, LampAhead(camera), in.camPos, LocalLightUpload(cfg));
+        engine::SelectLocalPointLight(in.localLights, LampAhead(camera), in.camPos,
+                                      LocalLightUpload(cfg, CameraPlace(in)));
     return in;
 }
 
@@ -1129,10 +1166,10 @@ void CheckStormSilhouetteBlendsByCoverage(Harness& m, const std::wstring& outDir
     Check(BlendsByCoverage(noisyBlend) && noisyBlend.largestResolvedError <= kMaxResolvedLevelError,
           "at a 4x silhouette in a noisy Classic storm the pixel blends the near and the far fog by sample coverage");
     Check(lit.rendered && lit.statesKept && authored_noise::ShaderRuns(lit.drawn.march, g_ps_lit_noisy_march_mid) &&
-              authored_noise::ShaderRuns(lit.drawn.splitComposite, g_ps_lit_split_composite_mid) &&
+              authored_noise::ShaderRuns(lit.drawn.splitComposite, g_ps_lit_noisy_split_composite_mid) &&
               BlendsByCoverage(litBlend) && litBlend.largestResolvedError <= kMaxResolvedLevelError,
           "with a point light the 4x storm marches through the noise with the lit noisy march, its silhouette takes "
-          "the lit split composite, the noise at its mean, and still blends by sample coverage");
+          "the lit noisy split composite, whose sides march through the noise, and still blends by sample coverage");
 }
 
 int LargestDifferenceAwayFromSilhouette(const Image& multisampled, const Image& single)
@@ -1160,7 +1197,7 @@ void CheckGradingMatchesSingleSampled(const Image& multisampled, const Image& si
 {
     const forever_look_checks::CurveMatch match = forever_look_checks::CompareSyntheticStripes(multisampled, world);
     forever_look_checks::PrintCurveMatch("colour grading on the 4x back buffer", match);
-    Check(match.WithinConversion() && single.w && multisampled.bgra == single.bgra,
+    Check(match.WithinDitheredConversion() && single.w && multisampled.bgra == single.bgra,
           "colour grading resolves a 4x back buffer, grades it like the curve and matches the single-sampled frame");
 }
 
@@ -1185,7 +1222,9 @@ void CheckMultisampledDevice(Harness& m, const DepthCopyProbe& probe, const std:
         return;
     D3DDEVICE_CREATION_PARAMETERS cp = {};
     m.dev->GetCreationParameters(&cp);
-    Check((cp.BehaviorFlags & D3DCREATE_PUREDEVICE) == 0, "the multisampled device drops the pure-device flag");
+    Check((cp.BehaviorFlags & kClientDeviceFlags) == kFogDeviceFlags,
+          "the multisampled device keeps hardware vertex processing and FPU preservation and drops only the "
+          "pure-device flag");
 
     const FogFrame fog = RenderFogOverDepthQuads(m);
     PrintFogFrame("4x fog", fog);
@@ -1285,7 +1324,7 @@ void CheckMultisamplingSetting(const std::wstring& outDir, const std::wstring& s
 
     const std::wstring savedIni = FullPath(outDir + L"\\multisampling.ini");
     CopyFileW(shippedIni.c_str(), savedIni.c_str(), FALSE);
-    WritePrivateProfileStringW(L"LuxVelum", L"Multisampling", L"0", savedIni.c_str());
+    WritePrivateProfileStringW(L"Luxvelum", L"Multisampling", L"0", savedIni.c_str());
     ConfigStore store;
     store.Load(NarrowPath(savedIni));
     const bool readOff = !store.Get().multisampling;
