@@ -43,8 +43,6 @@ std::string DataFile(const std::string& clientFolder, const char* name)
     return !IsFile(inData) && IsFile(besideTheDll) ? besideTheDll : inData;
 }
 
-// Project Deus loads the DLL from <client>\Data\Optional\<pack>\ (its optional graphics packs): the log, the
-// settings and the data stay beside the DLL there, where the Deus loader reads and writes Luxvelum.ini.
 bool InDeusOptionalPack(const std::string& folder)
 {
     std::string lower = folder;

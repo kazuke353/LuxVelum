@@ -8,7 +8,9 @@ Ascension/CoA 3.3.5a (build 12340) Direct3D 9 client. It installs as `Luxvelum.d
 `Data\Luxvelum\zones.ini`, and writes
 `Logs\Luxvelum.log` (`CoAVolFog.*` before TEST Build-24-11, `Luxveil.*` in TEST Build-24-11 and 24-12, all next to
 `Wow.exe` in earlier packages); without a `WTF\Luxvelum.ini` it takes over an existing `Luxvelum.ini` next to `Wow.exe`,
-else `Luxveil.ini` or `CoAVolFog.ini`.
+else `Luxveil.ini` or `CoAVolFog.ini`. The Project Deus build (branch `deus` of kazuke353/LuxVelum) loads the DLL
+from `Data\Optional\<pack>\` instead: there the log, `Luxvelum.ini`, `Luxvelum-zones.ini` and the data files all stay
+beside the DLL, where the Deus loader reads and writes the settings.
 
 It consists of a loader, a D3D9 device wrapper with a readable depth buffer, world-render hooks, a per-pixel
 ray-marching fog renderer and a water renderer. Fog layers come from the Classic client's own
