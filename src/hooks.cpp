@@ -314,8 +314,35 @@ void LeaveTransparentFogWorld()
     DisarmTransparentFog();
 }
 
+
+enum Tally { TBegin, TEnd, TOpaque, TTransp, TText, TWorldDone, TFog, TDoneOut, TTextOut, TRepeat, TComposited, TCount };
+unsigned g_t[TCount] = {};
+DWORD g_tallyTicks = 0;
+
+__declspec(noinline) void Tick(int i)
+{
+    ++g_t[i];
+}
+
+void TallyFlush()
+{
+    if (!LogEnabled(LogLevel::Debug))
+        return;
+    const DWORD now = GetTickCount();
+    if (!g_tallyTicks)
+        g_tallyTicks = now;
+    if (now - g_tallyTicks < 1000)
+        return;
+    VF_LOG_DEBUG("tally %lums b%u e%u op%u tr%u tx%u wd%u fog%u wdOut%u txOut%u trRep%u comp%u", now - g_tallyTicks,
+                 g_t[0], g_t[1], g_t[2], g_t[3], g_t[4], g_t[5], g_t[6], g_t[7], g_t[8], g_t[9], g_t[10]);
+    for (unsigned& v : g_t)
+        v = 0;
+    g_tallyTicks = now;
+}
+
 void OnFrameBegin()
 {
+    Tick(TBegin);
     g_renderedThisFrame = false;
     ResetTransparentFogFrame();
     if (FogDrawsInPlaceOfStockFog())
@@ -389,6 +416,8 @@ void LogTransparentFogStatsWhenDue()
 
 void OnFrameEnd()
 {
+    Tick(TEnd);
+    TallyFlush();
     OnLiquidSurfaceEnd();
     LeaveTransparentFogWorld();
     RestorePushedStockFog();
@@ -566,6 +595,7 @@ FogAttempt RenderWorldFog(FogDevice* device, FogPass pass)
 
 void RecordFogAttempt(const FogAttempt& attempt)
 {
+    Tick(TFog);
     g_renderedThisFrame = attempt.rendered;
     RecordFogFrame(attempt.rendered, attempt.cameraUnderLiquid, attempt.skip);
 }
@@ -648,6 +678,7 @@ void DrawGlareBeforeTheFog()
 void ArmTransparentFog(FogDevice* device)
 {
     g_transparentFog.composited = true;
+    Tick(TComposited);
     g_transparentFog.fit = LastStockFogFit(device);
     g_transparentFog.armed = true;
     ++g_transparentFogStats.earlyComposites;
@@ -656,7 +687,12 @@ void ArmTransparentFog(FogDevice* device)
 
 void OnTransparentsBegin()
 {
+    Tick(TTransp);
+    if (g_transparentFog.composited)
+        Tick(TRepeat);
     g_transparentFog.pastLiquid = true;
+    if (g_transparentFog.composited || g_transparentFog.drawnBeforeWorldText)
+        return;
     if (g_failed)
         return;
     ReloadConfigAfterInterval();
@@ -748,6 +784,7 @@ void FailTransparentFog()
 
 void OnOpaqueDone()
 {
+    Tick(TOpaque);
     FogDevice* device = g_worldClient->device();
     if (!device)
         return;
@@ -756,7 +793,12 @@ void OnOpaqueDone()
 
 void DrawFogBeforeWorldText()
 {
+    Tick(TText);
+    if (!g_transparentFog.inWorld)
+        Tick(TTextOut);
     if (g_failed || !g_transparentFog.inWorld || g_transparentFog.composited || g_transparentFog.drawnBeforeWorldText)
+        return;
+    if (g_stockFogPushed && !g_transparentFog.pastLiquid)
         return;
     ForeverLookBeforeEarlyFog();
     g_transparentFog.drawnBeforeWorldText = RenderCurrentWorldFog(g_worldClient->device());
@@ -764,6 +806,9 @@ void DrawFogBeforeWorldText()
 
 void OnWorldDone()
 {
+    Tick(TWorldDone);
+    if (!g_transparentFog.inWorld)
+        Tick(TDoneOut);
     if (!g_failed && g_transparentFog.composited)
         RenderGodRaysOverTheWorld(g_worldClient->device());
     else if (!g_failed && !g_transparentFog.drawnBeforeWorldText)
